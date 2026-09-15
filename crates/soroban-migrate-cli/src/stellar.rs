@@ -112,7 +112,9 @@ impl Invocation {
         for arg in self.arguments() {
             out.push(' ');
             if arg.contains(' ') {
-                out.push_str(&format!("'{arg}'"));
+                out.push('\'');
+                out.push_str(&arg);
+                out.push('\'');
             } else {
                 out.push_str(&arg);
             }

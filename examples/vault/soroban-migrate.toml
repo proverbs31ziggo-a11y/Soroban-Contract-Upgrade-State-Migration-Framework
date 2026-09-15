@@ -33,6 +33,11 @@ batch_limit_arg = "limit"
 # need it; every other command runs offline, which is what lets `check` be a CI gate.
 #
 # [network]
-# network_name = "testnet"          # or `rpc_url` + `network_passphrase` instead
+# name = "testnet"                  # or `rpc_url` + `passphrase` instead
 # contract = "C..."                 # the deployed contract's id or a `stellar` alias
 # source = "alice"                  # the identity that signs and pays
+# passphrase = "Test SDF Network ; September 2015"   # required with `rpc_url`: RPC alone
+#                                                   # does not identify a network
+#
+# The field names are the ones `Network` accepts, and the section rejects anything
+# else, so a wrong name here is a parse error rather than a silently ignored setting.
