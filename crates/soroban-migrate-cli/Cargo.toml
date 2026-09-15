@@ -1,0 +1,49 @@
+[package]
+name = "soroban-migrate-cli"
+description = "Command line interface for soroban-migrate: schema snapshot, compatibility check, codegen, and batched migration runs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+readme = "README.md"
+keywords = ["stellar", "soroban", "migration", "cli"]
+categories = ["development-tools", "command-line-utilities"]
+
+# No rustdoc target for the binary: it has no public API, and its crate name would
+# otherwise collide with the runtime crate's `soroban_migrate` documentation output.
+[[bin]]
+name = "soroban-migrate"
+path = "src/main.rs"
+doc = false
+
+[dependencies]
+# The framework's own crate, for its batch-size constants and the `contracttype`
+# shapes it defines. Using them rather than restating them is what stops the CLI
+# from budgeting for a batch size the executor would refuse.
+soroban-migrate = { workspace = true, features = ["testutils"] }
+soroban-migrate-schema.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+stellar-xdr.workspace = true
+soroban-sdk = { workspace = true, features = ["testutils"] }
+soroban-env-host.workspace = true
+walkdir = "2"
+toml = "0.8"
+ureq = { version = "2", features = ["json"] }
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile.workspace = true
+# Used to check that generated migration code is syntactically valid Rust. The generated
+# file is not part of any crate's build, so nothing else would notice a generator that
+# emits something which does not parse.
+syn.workspace = true
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
