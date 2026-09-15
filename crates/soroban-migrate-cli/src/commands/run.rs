@@ -83,7 +83,7 @@ pub fn run(project: &Project, args: &Args) -> Result<()> {
     }
 
     let (network, entries) = require_context(project)?;
-    let stellar = Stellar::discover()?;
+    let stellar = Stellar::discover(network.stellar_timeout())?;
 
     if !args.submit {
         println!(
@@ -239,6 +239,7 @@ mod tests {
             source: "alice".into(),
             passphrase: None,
             ledger: None,
+            stellar_timeout_seconds: None,
         });
         config.save(dir.path()).unwrap();
         let project = Project::open(dir.path()).unwrap();
