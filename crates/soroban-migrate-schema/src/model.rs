@@ -197,6 +197,117 @@ pub fn normalize_type(declared: &str) -> String {
         .replace("core::primitive::", "")
 }
 
+/// One variant of a contract's key-space enum.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyVariant {
+    /// The variant's name.
+    ///
+    /// This is the discriminant on the wire. `#[contracttype]` encodes an enum as a
+    /// vector whose first element is the *name* of the variant as a `Symbol`, not its
+    /// position — which is why renaming a variant breaks stored data and reordering
+    /// variants does not. See [`crate::diff::key_space_findings`].
+    pub name: String,
+    /// The payload as declared, in declaration order: `Address`, or `Address, u32`, or
+    /// for a struct variant `memo: Symbol, amount: i128`. `None` for a unit variant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<String>,
+    /// Whether the variant carries `#[migration]`, reserving it for the framework's own
+    /// bookkeeping keys.
+    #[serde(default)]
+    pub migration: bool,
+}
+
+impl KeyVariant {
+    /// The payload normalized for comparison, so that `soroban_sdk::Address` and
+    /// `Address` are the same payload rather than a reported change.
+    ///
+    /// Reuses [`normalize_type`], which is the same normalization the field-level diff
+    /// uses, so the two cannot drift apart in what they consider a spelling.
+    pub fn normalized_payload(&self) -> Option<String> {
+        self.payload.as_deref().map(normalize_type)
+    }
+}
+
+/// A contract's key space: the enum every storage key is encoded from.
+///
+/// # Why this is committed separately from the schemas
+///
+/// A schema describes what a *value* looks like. This describes which entry a key
+/// refers to, and the two fail differently. A schema change that is unsafe makes an
+/// entry unreadable; an unsafe key-space change makes an entry unreachable — the
+/// contract keeps serving reads and answers them out of the wrong place, or fails to
+/// find anything at all.
+///
+/// It is deliberately unversioned. The version numbers a contract records gate the
+/// *shape* of an entry, and a key space is not versioned in that sense: every read goes
+/// through it, so it has to be correct for entries of every version at once. What
+/// replaces a version number here is the committed snapshot itself — a change to the
+/// source that the snapshot does not describe is reported, and re-exporting it is the
+/// deliberate acknowledgement that the change was reviewed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeySpace {
+    /// The enum's type name. *Not* part of the encoding — only variant names are — so a
+    /// rename of the type itself is not a change and is not reported.
+    pub name: String,
+    /// Variants in declaration order.
+    pub variants: Vec<KeyVariant>,
+}
+
+impl KeySpace {
+    /// Builds a key space from its parts.
+    pub fn new(name: impl Into<String>, variants: Vec<KeyVariant>) -> Self {
+        Self {
+            name: name.into(),
+            variants,
+        }
+    }
+
+    /// One variant by name.
+    pub fn variant(&self, name: &str) -> Option<&KeyVariant> {
+        self.variants.iter().find(|v| v.name == name)
+    }
+
+    /// Parses a committed key-space snapshot.
+    ///
+    /// # Errors
+    ///
+    /// The `serde` error for a file that is not a key space.
+    pub fn from_json(text: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(text)
+    }
+
+    /// Renders the key space as pretty JSON, with a trailing newline.
+    ///
+    /// # Panics
+    ///
+    /// Never in practice: the model is plain data, so serializing it cannot fail.
+    pub fn to_json(&self) -> String {
+        let mut s =
+            serde_json::to_string_pretty(self).expect("key space serialization cannot fail");
+        s.push('\n');
+        s
+    }
+
+    /// Renders a stable, human-readable summary.
+    pub fn summary(&self) -> String {
+        let mut out = format!(
+            "{} ({} variant{})\n",
+            self.name,
+            self.variants.len(),
+            if self.variants.len() == 1 { "" } else { "s" }
+        );
+        for v in &self.variants {
+            let payload = match &v.payload {
+                Some(p) => format!("({p})"),
+                None => String::new(),
+            };
+            let marker = if v.migration { "  #[migration]" } else { "" };
+            out.push_str(&format!("    {}{payload}{marker}\n", v.name));
+        }
+        out
+    }
+}
+
 /// The set of schemas a project has committed.
 ///
 /// Keyed by *shape name*, then by version, and never by version alone. A contract
