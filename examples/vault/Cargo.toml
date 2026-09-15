@@ -1,0 +1,28 @@
+[package]
+name = "vault-example"
+description = "Worked example of a Soroban contract upgrade with soroban-migrate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+soroban-sdk.workspace = true
+soroban-migrate.workspace = true
+soroban-migrate-macros.workspace = true
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+soroban-migrate = { workspace = true, features = ["testutils"] }
+soroban-env-host.workspace = true
+# The CLI's parser and generator are exercised against the example's real schemas, so
+# that a change to either cannot silently stop agreeing with the other.
+soroban-migrate-schema.workspace = true
+# Used to check that generated migration code is syntactically valid Rust.
+syn.workspace = true

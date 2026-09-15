@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "name": "Balance",
+  "note": "A single account's balance, as of schema version 1.  A minimal entry, deliberately: the point of the example is the *migration*, and a shape small enough to read at a glance makes it obvious what the migration is doing.  # Why `name` is stated explicitly  A shape's name defaults to the struct's name, and versioned structs cannot all be called `Balance` — the Rust type names have to differ. Without `name`, `BalanceV1` and `BalanceV2` would register as two *unrelated* shapes, each with one version, and there would be no version pair to diff: `check` would report success about a change it never looked at. `name = \"Balance\"` is what makes them versions of one shape, and `soroban-migrate check` refuses a pair of structs whose names differ only by a version suffix precisely so that this cannot be forgotten silently.",
+  "fields": [
+    {
+      "name": "owner",
+      "declared": "Address",
+      "base": "Address",
+      "optional": false
+    },
+    {
+      "name": "amount",
+      "declared": "i128",
+      "base": "i128",
+      "optional": false
+    }
+  ]
+}

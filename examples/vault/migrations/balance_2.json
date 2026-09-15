@@ -1,0 +1,25 @@
+{
+  "version": 2,
+  "name": "Balance",
+  "note": "The same entry at schema version 2: a freeze flag is added.  `frozen` is `Option<bool>` rather than `bool`, and that choice is the whole reason this upgrade can roll out to a live contract. CAP-86's relaxed unpacking decodes a missing key as `None` for an `Option` field and *errors* for anything else, so an optional field means the version-2 code can read a version-1 entry without trapping — which is what lets the code ship before the state finishes migrating.  Making it `bool` would compile, be denied by `soroban-migrate check`, and panic on every account that had not been migrated yet.",
+  "fields": [
+    {
+      "name": "owner",
+      "declared": "Address",
+      "base": "Address",
+      "optional": false
+    },
+    {
+      "name": "amount",
+      "declared": "i128",
+      "base": "i128",
+      "optional": false
+    },
+    {
+      "name": "frozen",
+      "declared": "Option<bool>",
+      "base": "bool",
+      "optional": true
+    }
+  ]
+}

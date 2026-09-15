@@ -1,0 +1,38 @@
+# The example contract's migration configuration.
+#
+# Adopting the framework is this file plus one `#[storage_schema(version = N)]`
+# attribute per shape; everything else the CLI needs is derived from those.
+#
+# The example keeps `Balance` as the default shape because it is the one that has a
+# migration. `Stats` is versioned independently and appears in `schema list`, but no
+# command needs to name it unless one acts on it.
+
+# The shape a command acts on when it is not given `--schema`.
+schema = "Balance"
+
+# Where `#[storage_schema]` declarations are read from. `src` is the default, so this
+# line is documentation rather than configuration.
+source = ["src"]
+
+# The type implementing `soroban_migrate::Keyspace`, written into generated code.
+keyspace = "crate::keys::DataKey"
+
+# The module the generated migration imports the version structs from.
+types_module = "crate::schema"
+
+# The batch-driver entry points on the contract. These are the defaults, written out
+# because this file doubles as the example's documentation of them.
+[contract]
+version_fn = "schema_version"
+status_fn = "migration_status"
+begin_fn = "begin_migration"
+batch_fn = "migrate_batch"
+batch_limit_arg = "limit"
+
+# Uncomment to drive a deployed instance. The network commands are the only ones that
+# need it; every other command runs offline, which is what lets `check` be a CI gate.
+#
+# [network]
+# network_name = "testnet"          # or `rpc_url` + `network_passphrase` instead
+# contract = "C..."                 # the deployed contract's id or a `stellar` alias
+# source = "alice"                  # the identity that signs and pays
