@@ -1,0 +1,27 @@
+[package]
+name = "soroban-migrate-macros"
+description = "Derive macros for soroban-migrate: storage schemas, key spaces, and migrations"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+readme = "README.md"
+keywords = ["stellar", "soroban", "migration", "macros", "derive"]
+categories = ["development-tools", "wasm"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2.workspace = true
+quote.workspace = true
+syn.workspace = true
+soroban-migrate-schema.workspace = true
+
+[dev-dependencies]
+trybuild.workspace = true
+soroban-sdk = { workspace = true, features = ["testutils"] }
+soroban-migrate.workspace = true
