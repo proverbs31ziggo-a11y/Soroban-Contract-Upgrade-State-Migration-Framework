@@ -13,6 +13,7 @@
 use std::path::Path;
 
 use soroban_migrate_schema::model::Schema;
+use soroban_migrate_schema::KEY_SPACE_FILE;
 
 use crate::error::{CliError, Result};
 use crate::project::{Project, WriteOutcome};
@@ -168,6 +169,45 @@ fn export_schemas(project: &Project, check: bool) -> Result<()> {
                      snapshot is kept so the migration into it stays checkable"
                 );
             }
+        }
+    }
+
+    // The key space, if the project declares one. It is exported alongside the shapes
+    // because it is the other half of the same promise: a shape says what an entry
+    // holds, and the key space says which entry a key names.
+    if let Some(space) = project.key_space_from_source()? {
+        let outcome = if check {
+            match project.committed_key_space()? {
+                Some(committed_space) if committed_space == space => {
+                    WriteOutcome::Unchanged(project.key_space_path())
+                }
+                Some(_) => {
+                    drift.push(format!(
+                        "{KEY_SPACE_FILE} does not describe the key space in the source. A change \
+                         to a key space can make stored keys undecodable, so this is worth \
+                         reading before it is recorded"
+                    ));
+                    WriteOutcome::Written(project.key_space_path())
+                }
+                None => {
+                    drift.push(format!("{KEY_SPACE_FILE} is not committed"));
+                    WriteOutcome::Written(project.key_space_path())
+                }
+            }
+        } else {
+            project.write_key_space(&space)?
+        };
+        let path = relative(outcome.path(), project);
+        if !outcome.changed() {
+            unchanged += 1;
+            if !check {
+                println!("  unchanged {path}");
+            }
+        } else if check {
+            println!("  would write {path}");
+        } else {
+            written += 1;
+            println!("  wrote {path}");
         }
     }
 

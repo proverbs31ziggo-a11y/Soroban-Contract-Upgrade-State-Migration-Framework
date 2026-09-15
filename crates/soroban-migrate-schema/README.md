@@ -1,6 +1,6 @@
 # soroban-migrate-schema
 
-The off-chain half of [`soroban-migrate`](https://github.com/soroban-migrate/soroban-migrate):
+The off-chain half of [`soroban-migrate`](https://github.com/proverbs31ziggo-a11y/Soroban-Contract-Upgrade-State-Migration-Framework):
 the schema model, the source parser, the compatibility diff, and the migration
 generator. It never runs inside a contract.
 

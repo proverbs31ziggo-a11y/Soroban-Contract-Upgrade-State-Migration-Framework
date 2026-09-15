@@ -37,7 +37,7 @@ pub struct Args {
 pub fn run(project: &Project, args: &Args) -> Result<()> {
     let network = require_network(project)?;
     let entries = &project.config.contract;
-    let stellar = Stellar::discover()?;
+    let stellar = Stellar::discover(network.stellar_timeout())?;
 
     let version = parse_optional_u32(&call(&stellar, network, &entries.version_fn)?)?;
     let status_output = call(&stellar, network, &entries.status_fn)?;

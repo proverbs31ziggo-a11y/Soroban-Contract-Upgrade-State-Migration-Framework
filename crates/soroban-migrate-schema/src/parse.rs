@@ -26,7 +26,7 @@
 use syn::{Attribute, Fields, Item, Lit, Type};
 
 use crate::error::SchemaError;
-use crate::model::{Field, Schema};
+use crate::model::{Field, KeySpace, KeyVariant, Schema};
 
 /// Parses every `#[storage_schema]` declaration in one Rust source file.
 ///
@@ -215,6 +215,115 @@ fn render_type(ty: &Type) -> String {
 /// `Retyped` change. Sharing one function is the only way to guarantee they cannot.
 pub fn render_field_type(ty: &Type) -> String {
     render_type(ty)
+}
+
+/// Parses a contract's key-space enum out of one Rust source file.
+///
+/// # Which enum
+///
+/// A key space is identified by structure rather than by name, and either of two
+/// independent signals is enough: an enum that derives `Keyspace`, or one with a
+/// variant marked `#[migration]`. Accepting both means the key space is found whether
+/// or not the derive is in scope, and whether or not the migration variant has been
+/// renamed to something less obvious.
+///
+/// A file with neither returns `None`, which is the common case: most files have no
+/// key space, and a scan over a source tree hands this function plenty of them.
+///
+/// # Errors
+///
+/// [`SchemaError::Parse`] only for source that is not valid Rust. Unlike
+/// `#[storage_schema]`, there is no malformed key space to report: the enum carries no
+/// attribute of ours to be malformed, and an enum shape that cannot be read is simply
+/// not a key space.
+pub fn parse_key_space(file: &str, source: &str) -> Result<Option<KeySpace>, SchemaError> {
+    let ast = syn::parse_file(source).map_err(|e| SchemaError::Parse {
+        file: file.to_string(),
+        message: e.to_string(),
+    })?;
+
+    for item in &ast.items {
+        if let Item::Enum(item) = item {
+            if let Some(space) = key_space_of(item) {
+                return Ok(Some(space));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Builds a key space from an enum, if that enum is one.
+fn key_space_of(item: &syn::ItemEnum) -> Option<KeySpace> {
+    let marked = item
+        .variants
+        .iter()
+        .any(|v| carries_attr(&v.attrs, "migration"));
+    if !marked && !derives_named(&item.attrs, "Keyspace") {
+        return None;
+    }
+
+    let variants = item
+        .variants
+        .iter()
+        .map(|v| KeyVariant {
+            name: v.ident.to_string(),
+            payload: payload_of(&v.fields),
+            migration: carries_attr(&v.attrs, "migration"),
+        })
+        .collect();
+    Some(KeySpace::new(item.ident.to_string(), variants))
+}
+
+/// The declared payload of a variant, in declaration order.
+///
+/// Declaration order rather than a sorted order, because the encoded vector follows it.
+/// A named-field variant keeps its field names, since those are its map keys.
+fn payload_of(fields: &Fields) -> Option<String> {
+    let rendered = match fields {
+        Fields::Unit => return None,
+        Fields::Unnamed(f) => f
+            .unnamed
+            .iter()
+            .map(|f| render_field_type(&f.ty))
+            .collect::<Vec<_>>()
+            .join(", "),
+        Fields::Named(f) => f
+            .named
+            .iter()
+            .map(|f| {
+                let name = f
+                    .ident
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_default();
+                format!("{}: {}", name, render_field_type(&f.ty))
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+    };
+    Some(rendered)
+}
+
+/// Whether an attribute list contains `#[name]`.
+fn carries_attr(attrs: &[Attribute], name: &str) -> bool {
+    attrs.iter().any(|a| a.path().is_ident(name))
+}
+
+/// Whether a `#[derive(..)]` list names a particular trait.
+fn derives_named(attrs: &[Attribute], name: &str) -> bool {
+    attrs.iter().any(|attr| {
+        if !attr.path().is_ident("derive") {
+            return false;
+        }
+        let mut found = false;
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident(name) {
+                found = true;
+            }
+            Ok(())
+        });
+        found
+    })
 }
 
 /// Removes the spaces `quote!` inserts around punctuation in a rendered type.

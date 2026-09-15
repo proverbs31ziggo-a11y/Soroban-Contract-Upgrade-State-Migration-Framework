@@ -1,7 +1,7 @@
 # soroban-migrate-cli
 
 The `soroban-migrate` binary. See the
-[root README](https://github.com/soroban-migrate/soroban-migrate#readme) for the full
+[root README](https://github.com/proverbs31ziggo-a11y/Soroban-Contract-Upgrade-State-Migration-Framework#readme) for the full
 walkthrough.
 
 ## Commands

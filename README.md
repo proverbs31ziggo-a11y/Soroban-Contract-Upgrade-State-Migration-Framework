@@ -28,7 +28,7 @@ for exactly which primitive each mechanism depends on.
 | | |
 | --- | --- |
 | **Versioned schemas** | A shape declares its version with `#[storage_schema(version = N)]`. Snapshots are committed one file per version, like Rails' `db/schema.rb` or Diesel's migration snapshots, so the diff that justified a migration stays checkable after the old struct is deleted. |
-| **A compatibility gate** | `soroban-migrate check` diffs every version pair and refuses upgrades that would make entries unreadable or silently discard a field. It exits `2`, so CI can tell "do not ship this" from "the repository is broken". |
+| **A compatibility gate** | `soroban-migrate check` diffs every version pair, and the contract's key space against its committed snapshot, refusing upgrades that would make entries unreadable or unreachable, or silently discard a field. It exits `2`, so CI can tell "do not ship this" from "the repository is broken". |
 | **Generated migrations** | `soroban-migrate generate` writes the `Migration` implementation — including the tolerant shadow struct that renames and type changes need in order to be re-runnable. |
 | **A key index** | Soroban cannot enumerate storage, so the framework keeps an append-only, paged list of the keys the contract has written. One extra read-modify-write per application write buys bounded enumeration. |
 | **A batched executor** | A migration over thousands of entries cannot fit one transaction. Batches checkpoint a cursor on chain and resume after failure, and a batch is one atomic transaction, so a failed batch leaves nothing behind. |
@@ -135,8 +135,18 @@ It cannot be submitted as one transaction. A framework that offers a one-shot
 | make a field required | **denied** unless the plan declares how absent values are filled |
 | rename a field | only recognised when the plan declares it; otherwise it is a removal plus an addition |
 | `BalanceV1` / `BalanceV2` with no shared `name` | **denied** — two unrelated shapes means no version pair, and `check` would otherwise pass about a change it never looked at |
+| rename a key-space variant | **denied** — a stored key's discriminant is the variant's *name*, so every key written under it stops decoding |
+| change a key-space variant's payload | **denied** — for the same reason: the encoded vector after the discriminant changes |
+| remove a key-space variant | **denied** — the entries written under it become unreachable, and so un-migratable |
+| move the `#[migration]` marker | **denied** — the framework's version marker, cursor, and index move to a different variant |
+| reorder key-space variants | safe — the generated case list and dispatch arms are both built from declaration order, so they move together |
+| add a key-space variant | safe — no existing key refers to it |
 
 Every one of those compiles. None of them is a build error.
+
+The key-space rows are the ones worth reading twice: renaming a variant and reordering variants
+look alike and are opposites. Reordering is the intuitive fear and is harmless; renaming is the
+thing nobody worries about and is fatal.
 
 ---
 

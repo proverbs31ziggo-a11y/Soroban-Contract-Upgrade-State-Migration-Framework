@@ -21,7 +21,9 @@
 //! tests, and the thing most likely to break is the argument list — a flag renamed in
 //! a CLI release, an argument passed before the `--` separator instead of after it.
 
-use std::process::Command;
+use std::io::Read;
+use std::process::{Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::error::{CliError, Result};
 
@@ -123,26 +125,52 @@ impl Invocation {
     }
 }
 
+/// The wall-clock limit for one `stellar` invocation, in seconds, when the
+/// configuration does not say otherwise.
+///
+/// Generous, because a batch against a busy endpoint legitimately takes a while and a
+/// limit that fired on a healthy slow network would be worse than none. It is finite
+/// because the alternative is a process that never returns: a rejection arrives in
+/// seconds, and anything that has not answered in minutes is a stall.
+pub const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
+
+/// How often the wait loop looks at whether the child has exited.
+///
+/// The cost of a shorter interval is one `waitpid` per tick on a process that is
+/// already running; the cost of a longer one is that a deadline is overshot by up to the
+/// interval, which for a migration is nothing.
+const POLL_INTERVAL: Duration = Duration::from_millis(25);
+
 /// The `stellar` CLI, discovered once and reused.
 pub struct Stellar {
     program: String,
+    timeout: Option<Duration>,
 }
 
 impl Stellar {
-    /// Locates a `stellar` binary.
+    /// Locates a `stellar` binary that will be given `timeout` per invocation.
+    ///
+    /// `None` waits indefinitely, which the configuration can ask for explicitly by
+    /// setting `stellar_timeout_seconds = 0`.
     ///
     /// # Errors
     ///
-    /// [`CliError::Missing`] when none is on `PATH`, naming the install source. This
-    /// is checked up front rather than at the first invocation so that a `run` with
-    /// many batches does not discover the problem after it has already started.
-    pub fn discover() -> Result<Self> {
+    /// [`CliError::Missing`] when none is on `PATH`, naming the install source. This is
+    /// checked up front rather than at the first invocation so that a `run` with many
+    /// batches does not discover the problem after it has already started.
+    ///
+    /// The version probe is subject to the same deadline: a binary that hangs is exactly
+    /// as unrecoverable as one that is absent, and far more confusing.
+    pub fn discover(timeout: Option<Duration>) -> Result<Self> {
         let program = std::env::var("SOROBAN_MIGRATE_STELLAR").unwrap_or_else(|_| "stellar".into());
-        let output = Command::new(&program).arg("--version").output();
-        match output {
-            Ok(output) if output.status.success() => Ok(Self { program }),
+        match run_with_timeout(&program, &["--version".to_string()], timeout) {
+            Ok((status, _, _)) if status.success() => Ok(Self { program, timeout }),
             Ok(_) => Err(CliError::Missing(format!(
                 "`{program} --version` failed. Set SOROBAN_MIGRATE_STELLAR to a working binary."
+            ))),
+            Err(CliError::Network(_)) => Err(CliError::Missing(format!(
+                "`{program} --version` did not finish in time. Set SOROBAN_MIGRATE_STELLAR to a \
+                 working binary, or raise `stellar_timeout_seconds` in the `[network]` section."
             ))),
             Err(e) => Err(CliError::Missing(format!(
                 "could not run `{program}`: {e}. The network commands delegate signing and \
@@ -157,15 +185,24 @@ impl Stellar {
     /// # Errors
     ///
     /// [`CliError::Network`] carrying the CLI's own stderr, which is where the reason
-    /// for a failed simulation or a rejected transaction appears.
+    /// for a failed simulation or a rejected transaction appears — and the same error,
+    /// with a different message, when the invocation exceeded the deadline.
     pub fn invoke(&self, invocation: &Invocation) -> Result<String> {
-        let output = Command::new(&self.program)
-            .args(invocation.arguments())
-            .output()
-            .map_err(|e| CliError::io(&self.program, e))?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        let arguments = invocation.arguments();
+        let (status, stdout, stderr) =
+            match run_with_timeout(&self.program, &arguments, self.timeout) {
+                Ok(result) => result,
+                // The deadline error is about the process; the operator is looking at an
+                // invocation. Name it, so the message is something they can re-run by hand.
+                Err(CliError::Network(detail)) => {
+                    return Err(CliError::Network(format!(
+                        "{}: {detail}",
+                        invocation.command_line()
+                    )));
+                }
+                Err(other) => return Err(other),
+            };
+        if !status.success() {
             return Err(CliError::Network(format!(
                 "`{}` failed:\n{}",
                 invocation.command_line(),
@@ -174,6 +211,89 @@ impl Stellar {
         }
         Ok(stdout)
     }
+}
+
+/// Runs `program args...` with a wall-clock deadline, draining both pipes.
+///
+/// # Why both pipes are drained on their own threads
+///
+/// A child that writes more than one pipe buffer's worth blocks until someone reads it.
+/// Polling `try_wait` while leaving the pipes unread would therefore report a timeout on
+/// a process that is merely waiting to be read — turning a slow-but-fine invocation into
+/// a false alarm about an ambiguous submission, which is the worst possible thing to be
+/// wrong about here.
+///
+/// # Errors
+///
+/// [`CliError::Io`] when the process cannot be started, and [`CliError::Network`] when it
+/// exceeds `timeout`. A non-zero exit is returned rather than raised, because the callers
+/// want different messages for it.
+fn run_with_timeout(
+    program: &str,
+    args: &[String],
+    timeout: Option<Duration>,
+) -> Result<(ExitStatus, String, String)> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| CliError::io(program, e))?;
+
+    let stdout_pipe = child.stdout.take().expect("stdout was piped");
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let drain = |mut pipe: Box<dyn std::io::Read + Send>| {
+        std::thread::spawn(move || {
+            let mut buffer = Vec::new();
+            let _ = pipe.read_to_end(&mut buffer);
+            buffer
+        })
+    };
+    let stdout_thread = drain(Box::new(stdout_pipe));
+    let stderr_thread = drain(Box::new(stderr_pipe));
+
+    let deadline = timeout.map(|t| Instant::now() + t);
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|e| CliError::io(program, e))? {
+            break status;
+        }
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            // Kill before reporting, so a stalled child cannot outlive the command that
+            // gave up on it, and reap it so no zombie is left behind.
+            let _ = child.kill();
+            let _ = child.wait();
+            // The reader threads are deliberately *not* joined. A child that spawned
+            // something which inherited the pipes — `sh -c 'sleep 30'`, where `sh` forks
+            // rather than execs — leaves the write ends open after the child itself is
+            // gone, so joining here would block for exactly as long as the deadline was
+            // supposed to save us. They exit on their own once the last holder of the
+            // pipe closes it, and a deadline is terminal for the run that hit it, so the
+            // process they belong to is on its way out regardless.
+            //
+            // The consequence to be honest about: a grandchild that outlives its parent
+            // is not killed. Killing the process *group* would cover that, at the cost of
+            // a `unix`-only path where this one is portable.
+            drop(stdout_thread);
+            drop(stderr_thread);
+            let seconds = timeout.map_or(0, |t| t.as_secs());
+            return Err(CliError::Network(format!(
+                "`{program}` did not finish within {seconds}s and was killed. A network that \
+                 does not answer is not the same as one that refused: this invocation may \
+                 still have been submitted. Check it with `soroban-migrate status` before \
+                 retrying anything, and raise `stellar_timeout_seconds` under `[network]` in \
+                 soroban-migrate.toml if the endpoint is merely slow."
+            )));
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    };
+
+    let stdout = stdout_thread.join().unwrap_or_default();
+    let stderr = stderr_thread.join().unwrap_or_default();
+    Ok((
+        status,
+        String::from_utf8_lossy(&stdout).to_string(),
+        String::from_utf8_lossy(&stderr).to_string(),
+    ))
 }
 
 /// Parses a contract call's return value as an unsigned integer.
@@ -388,5 +508,141 @@ mod tests {
         assert!(is_null("null"));
         assert!(is_null("  "));
         assert!(!is_null("0"));
+    }
+
+    // --- The deadline ------------------------------------------------------------
+    //
+    // These run a real child process. `sh` rather than anything Soroban-related, because
+    // the point is the runner itself: what it does with a process that finishes, one that
+    // will never finish, and one that writes more than a pipe buffer before finishing.
+
+    /// A `sh -c` argument vector.
+    fn sh(script: &str) -> Vec<String> {
+        vec!["-c".to_string(), script.to_string()]
+    }
+
+    #[test]
+    fn a_command_that_finishes_returns_its_output() {
+        let (status, stdout, _) =
+            run_with_timeout("sh", &sh("printf hello"), Some(Duration::from_secs(10)))
+                .expect("a fast command must not be an error");
+        assert!(status.success());
+        assert_eq!(stdout, "hello");
+    }
+
+    #[test]
+    fn a_non_zero_exit_is_returned_rather_than_raised() {
+        // The callers want different messages for this — `discover` calls it a missing
+        // binary, `invoke` calls it a rejected call — so the runner does not decide.
+        let (status, _, _) = run_with_timeout("sh", &sh("exit 3"), Some(Duration::from_secs(10)))
+            .expect("a non-zero exit is not a runner error");
+        assert!(!status.success());
+    }
+
+    #[test]
+    fn a_command_that_exceeds_the_deadline_is_killed() {
+        let started = Instant::now();
+        let error = run_with_timeout("sh", &sh("sleep 30"), Some(Duration::from_millis(200)))
+            .expect_err("a hung command must not return success");
+        assert!(matches!(error, CliError::Network(_)));
+        assert!(error.to_string().contains("did not finish"), "got: {error}");
+        // Killed rather than abandoned: 30 seconds of `sleep` must not be waited out.
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "took {:?}, so the child was not killed at the deadline",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn the_deadline_error_says_the_invocation_may_still_have_landed() {
+        // The whole value of the timeout. An operator who reads "failed" and re-runs
+        // submits the batch twice; one who reads this checks first.
+        let error = run_with_timeout("sh", &sh("sleep 30"), Some(Duration::from_millis(200)))
+            .expect_err("a hung command must not return success");
+        let message = error.to_string();
+        assert!(message.contains("may"), "got: {message}");
+        assert!(
+            message.contains("status"),
+            "it must name the way to find out: {message}"
+        );
+        assert!(
+            message.contains("stellar_timeout_seconds"),
+            "and the way to raise the limit: {message}"
+        );
+    }
+
+    #[test]
+    fn no_deadline_means_no_limit() {
+        let (status, stdout, _) =
+            run_with_timeout("sh", &sh("printf ok"), None).expect("no deadline cannot fail");
+        assert!(status.success());
+        assert_eq!(stdout, "ok");
+    }
+
+    #[test]
+    fn output_larger_than_a_pipe_buffer_does_not_look_like_a_hang() {
+        // The reason both pipes are drained on their own threads. 200 KB is well past the
+        // 64 KB a pipe holds, so a runner that polled `try_wait` without reading would
+        // report a timeout on a process that had already finished its work and was
+        // merely waiting to be read — and the operator would be told, wrongly, that their
+        // batch might have been submitted.
+        let (status, stdout, _) = run_with_timeout(
+            "sh",
+            &sh("head -c 200000 /dev/zero | tr '\\0' x"),
+            Some(Duration::from_secs(10)),
+        )
+        .expect("a command that writes a lot must not time out");
+        assert!(status.success());
+        assert_eq!(stdout.len(), 200_000);
+    }
+
+    #[test]
+    fn a_program_that_cannot_be_run_is_an_io_error_not_a_deadline() {
+        let error = run_with_timeout(
+            "soroban-migrate-no-such-binary-xyz",
+            &[],
+            Some(Duration::from_secs(1)),
+        )
+        .expect_err("a missing binary must fail");
+        assert!(matches!(error, CliError::Io { .. }), "got: {error}");
+    }
+
+    // --- The configured limit ----------------------------------------------------
+
+    fn network(stellar_timeout_seconds: Option<u64>) -> crate::config::Network {
+        crate::config::Network {
+            name: Some("testnet".into()),
+            rpc_url: None,
+            contract: "CABC".into(),
+            source: "alice".into(),
+            passphrase: None,
+            ledger: None,
+            stellar_timeout_seconds,
+        }
+    }
+
+    #[test]
+    fn an_unstated_limit_gets_a_finite_default() {
+        // Asserting it is `Some` is the point, not the number: a default of "no limit"
+        // would make the timeout an opt-in, which is the state this issue was filed
+        // about. Read through the configuration rather than the constant, so the
+        // assertion is about behaviour and cannot be folded away at compile time.
+        let default = network(None).stellar_timeout();
+        assert!(default.is_some(), "the default must be a finite deadline");
+        assert_eq!(default, Some(Duration::from_secs(DEFAULT_TIMEOUT_SECONDS)));
+    }
+
+    #[test]
+    fn a_stated_limit_is_honoured() {
+        assert_eq!(
+            network(Some(7)).stellar_timeout(),
+            Some(Duration::from_secs(7))
+        );
+    }
+
+    #[test]
+    fn zero_states_that_there_is_no_limit() {
+        assert_eq!(network(Some(0)).stellar_timeout(), None);
     }
 }

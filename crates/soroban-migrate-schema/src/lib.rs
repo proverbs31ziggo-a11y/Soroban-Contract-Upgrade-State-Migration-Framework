@@ -102,3 +102,10 @@ pub fn schema_file_name(name: &str, version: u32) -> String {
 pub fn plan_file_name(name: &str, from: u32, to: u32) -> String {
     format!("{}_{}_to_{}.plan.json", name.to_lowercase(), from, to)
 }
+
+/// The file name of the committed key-space snapshot.
+///
+/// A fixed name rather than one derived from the enum's type, because the file
+/// describes the contract's key space and a contract has exactly one. Unlike a schema
+/// snapshot it carries no version, for the reason [`model::KeySpace`] sets out.
+pub const KEY_SPACE_FILE: &str = "keyspace.json";

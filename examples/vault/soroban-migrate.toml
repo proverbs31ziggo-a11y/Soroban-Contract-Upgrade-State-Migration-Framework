@@ -38,6 +38,9 @@ batch_limit_arg = "limit"
 # source = "alice"                  # the identity that signs and pays
 # passphrase = "Test SDF Network ; September 2015"   # required with `rpc_url`: RPC alone
 #                                                   # does not identify a network
+# ledger = 1234                     # pin the fork point, so a dry run is reproducible
+# stellar_timeout_seconds = 120     # per `stellar` call; the default. `0` waits forever,
+#                                   # which is never right for an unattended run
 #
 # The field names are the ones `Network` accepts, and the section rejects anything
 # else, so a wrong name here is a parse error rather than a silently ignored setting.
