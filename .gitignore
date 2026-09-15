@@ -1,0 +1,22 @@
+# Build output
+/target
+**/target
+
+# Soroban's test harness writes a JSON snapshot per test invocation. They are
+# diagnostic dumps of host state, regenerated on every run, and committing them
+# makes every test change produce a thousand-line diff.
+test_snapshots/
+
+# Editor and OS noise
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Local environment
+.env
+.env.local
+
+# Ledger snapshots for `soroban-migrate dry-run`. They are fetched per network, take
+# megabytes, and are only ever an input to a replay.
+.soroban-migrate/
