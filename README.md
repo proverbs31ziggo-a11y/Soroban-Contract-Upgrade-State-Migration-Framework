@@ -167,6 +167,11 @@ Two invariants belong to the application, and both fail silently:
   and a `[network]` section.** They delegate transaction construction, signing and
   submission to it. This tool never handles a secret key, and it does not reimplement
   fee estimation or auth assembly.
+* **`run`, `status` and `dry-run` have never been executed against a live endpoint.**
+  What is tested is everything up to the wire: the `stellar` argument vectors, the
+  parsing of its output, and the batch/resume loop replayed against a caller that
+  returns scripted results. Nothing here has sent a transaction to Testnet or Mainnet,
+  so treat the first real run as the first real run.
 * **`dry-run` proves the batches fit; it does not prove the migration is correct.** It
   runs the contract's own code against the contract's own state in a forked host, so a
   migration that computes the wrong value computes it identically there. Correctness
@@ -205,10 +210,25 @@ docs/cap-85-86.md               which protocol primitive each mechanism uses
 
 ```console
 $ cargo test --workspace                    # 248 tests
-$ cargo clippy --workspace --all-targets    # clean under clippy::pedantic
+$ cargo clippy --workspace --all-targets -- -D warnings
 $ cargo fmt --all --check
-$ cargo doc --workspace --no-deps
+$ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
 ```
+
+Building the example contract needs `stellar-cli` >= 25.2.0, not just `cargo`:
+
+```console
+$ rustup target add wasm32v1-none
+$ stellar contract build --package vault-example
+```
+
+Two traps make plain `cargo build` unusable here, and `soroban-sdk`'s build script
+enforces both rather than warning about them. `wasm32-unknown-unknown` is rejected on
+Rust 1.82+, which enables `reference-types` and `multi-value` that the host does not
+support, so the target must be `wasm32v1-none`. And because the contract's spec is only
+correct once the build system has shaken it, a build that skips that step links and
+exports correctly while carrying a wrong public interface — `cargo build --target
+wasm32v1-none` only tells you the code compiles for the host.
 
 The tests that carry the most weight, and what they are evidence for:
 
