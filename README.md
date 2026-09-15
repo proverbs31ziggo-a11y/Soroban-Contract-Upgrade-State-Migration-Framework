@@ -215,20 +215,31 @@ $ cargo fmt --all --check
 $ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
 ```
 
-Building the example contract needs `stellar-cli` >= 25.2.0, not just `cargo`:
+Building the example contract needs `stellar-cli` >= 25.2.0 and a Rust compiler other
+than 1.91.0 — not just `cargo`:
 
 ```console
 $ rustup target add wasm32v1-none
 $ stellar contract build --package vault-example
 ```
 
-Two traps make plain `cargo build` unusable here, and `soroban-sdk`'s build script
-enforces both rather than warning about them. `wasm32-unknown-unknown` is rejected on
-Rust 1.82+, which enables `reference-types` and `multi-value` that the host does not
-support, so the target must be `wasm32v1-none`. And because the contract's spec is only
-correct once the build system has shaken it, a build that skips that step links and
-exports correctly while carrying a wrong public interface — `cargo build --target
-wasm32v1-none` only tells you the code compiles for the host.
+Three traps make plain `cargo build` unusable here, and the toolchain enforces all three
+rather than warning about them.
+
+* **The compiler must be one `stellar contract build` accepts.** It refuses 1.91.0
+  outright, and rejects 1.82 through 1.83, because those compilers miscompile Wasm. So
+  the workspace's `rust-version = "1.91.0"` — a claim about what compiles the crates,
+  which CI does test at exactly that version — is deliberately *not* the version that
+  builds the artifact. CI builds the contract with 1.98.1.
+* **The target must be `wasm32v1-none`.** `wasm32-unknown-unknown` is rejected on Rust
+  1.82+, which enables `reference-types` and `multi-value` that the host does not
+  support.
+* **The spec is only correct once the build system has shaken it.** A build that skips
+  that step links and exports correctly while carrying a wrong public interface, so
+  `cargo build --target wasm32v1-none` only tells you the code compiles for the host.
+
+`stellar contract build` builds the `release` profile rather than `[profile.contract]`;
+pass `--profile contract` for the smaller, stripped artifact.
 
 The tests that carry the most weight, and what they are evidence for:
 

@@ -39,10 +39,13 @@ syn = { version = "2", features = ["full", "extra-traits"] }
 # Soroban contracts must be built with overflow checks on and as small as
 # possible.
 #
-# Build a deployable artifact with `stellar contract build`, which uses this
-# profile by default. Two things mean plain `cargo build` is not enough, and both
-# are enforced by `soroban-sdk`'s build script rather than being advisory:
+# Build a deployable artifact with `stellar contract build`, not plain `cargo
+# build`. Three requirements are enforced rather than advisory:
 #
+#   * The compiler must be one `stellar contract build` accepts. It refuses
+#     1.91.0 outright, and rejects 1.82 through 1.83, because those compilers
+#     miscompile Wasm. This workspace's `rust-version` is therefore not the
+#     version that builds the contract; see README.md, "Verifying it".
 #   * The target must be `wasm32v1-none`. `wasm32-unknown-unknown` is rejected
 #     outright on Rust 1.82+, which enables reference-types and multi-value that
 #     the Soroban host does not support.
@@ -52,6 +55,9 @@ syn = { version = "2", features = ["full", "extra-traits"] }
 #
 # `cargo build --target wasm32v1-none` therefore only tells you the code compiles
 # for the host; it does not produce something to deploy.
+#
+# Note that `stellar contract build` builds the `release` profile below, not
+# `[profile.contract]`; pass `--profile contract` for the smaller artifact.
 [profile.contract]
 inherits = "release"
 opt-level = "z"
