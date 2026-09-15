@@ -1,0 +1,36 @@
+[package]
+name = "soroban-migrate"
+description = "Versioned storage-schema migration framework for Soroban smart contracts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+readme = "README.md"
+keywords = ["stellar", "soroban", "migration", "upgrade", "contract"]
+categories = ["development-tools", "wasm"]
+
+[dependencies]
+soroban-sdk.workspace = true
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+# Pinned to the exact version `soroban-sdk` itself depends on, so cargo unifies
+# them into one copy. `InvocationResourceLimits` and the SDK's
+# `NetworkInvocationResourceLimits` trait have to be the *same* type for the
+# resource-limit tests to compile.
+soroban-env-host = { workspace = true }
+
+[features]
+default = []
+# Enables helpers that only make sense inside tests / simulations.
+testutils = ["soroban-sdk/testutils"]
+
+[lib]
+crate-type = ["rlib"]
+
+[package.metadata.docs.rs]
+all-features = true
+targets = ["x86_64-unknown-linux-gnu"]
