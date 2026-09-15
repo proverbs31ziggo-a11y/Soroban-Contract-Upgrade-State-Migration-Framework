@@ -87,9 +87,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Deliberately not the workspace's `rust-version` of 1.91.0. `stellar
+      # contract build` refuses exactly 1.91.0, and rejects 1.82 through 1.83,
+      # because those compilers miscompile Wasm — reusing the MSRV here is how
+      # this job first failed. The MSRV claim is still tested, by the `check`
+      # job above; this job only has to produce the artifact. 1.98.1 is the
+      # current stable and was verified to build this package.
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.91.0"
+          toolchain: "1.98.1"
           # `wasm32-unknown-unknown` is rejected outright on Rust 1.82+.
           targets: wasm32v1-none
 
@@ -103,11 +109,15 @@ jobs:
         run: stellar contract build --package vault-example
 
       # A build that silently produced an empty or absent artifact would otherwise
-      # pass, since `stellar` reports success on the build itself. The output path
-      # depends on which profile `stellar` selects, so find it rather than assume it.
+      # pass, since `stellar` reports success on the build itself. Assert the exact
+      # path rather than `find`, which also matches the `deps/` and un-optimized
+      # copies and whose `head -n1` is directory-order dependent. The spec section
+      # is checked because a Wasm whose spec was never shaken links and exports
+      # correctly while carrying a wrong public interface.
       - name: Artifact is a contract
         run: |
-          wasm=$(find target -name 'vault_example.wasm' -type f | head -n1)
-          test -n "$wasm"
+          wasm=target/wasm32v1-none/release/vault_example.wasm
           test -s "$wasm"
+          grep -aq contractspecv0 "$wasm"
+          grep -aq contractmetav0 "$wasm"
           echo "wasm: $wasm ($(wc -c < "$wasm") bytes)"
