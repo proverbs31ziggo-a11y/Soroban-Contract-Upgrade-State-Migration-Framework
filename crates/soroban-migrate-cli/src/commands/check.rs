@@ -27,8 +27,11 @@
 //! is a snapshot file and a plan file, which is the only point at which a schema
 //! change is cheap to reconsider.
 
-use soroban_migrate_schema::diff::{ChangeKind, Diff, Finding, Severity, Verdict};
+use soroban_migrate_schema::diff::{
+    key_space_findings, ChangeKind, Diff, Finding, Severity, Verdict,
+};
 use soroban_migrate_schema::model::SchemaSet;
+use soroban_migrate_schema::KEY_SPACE_FILE;
 
 use crate::error::{CliError, Result};
 use crate::project::Project;
@@ -112,6 +115,7 @@ pub fn run(project: &Project, args: &Args) -> Result<()> {
     let mut report = Report::default();
     if !args.no_source {
         collect_drift(project, &committed, &mut report);
+        collect_key_space(project, &mut report);
     }
     collect_version_suffix_families(&committed, &mut report);
 
@@ -171,6 +175,7 @@ fn collect_drift(project: &Project, committed: &SchemaSet, report: &mut Report) 
             report.drift.push(Drift {
                 shape: "(source)".into(),
                 version: 0,
+                severity: Severity::Denied,
                 detail: format!(
                     "the source could not be parsed, so the committed snapshots could not be \
                      compared against it: {error}"
@@ -188,6 +193,7 @@ fn collect_drift(project: &Project, committed: &SchemaSet, report: &mut Report) 
                 Some(_) => report.drift.push(Drift {
                     shape: name.to_string(),
                     version,
+                    severity: Severity::Denied,
                     detail: "changed in the source without its version changing. Bump \
                              `#[storage_schema(version = N)]` and the version the contract \
                              records with it, or this snapshot stops describing the code."
@@ -196,12 +202,123 @@ fn collect_drift(project: &Project, committed: &SchemaSet, report: &mut Report) 
                 None => report.drift.push(Drift {
                     shape: name.to_string(),
                     version,
+                    severity: Severity::Denied,
                     detail: "is declared in the source but has no committed snapshot. Run \
                              `soroban-migrate schema export`."
                         .into(),
                 }),
             }
         }
+    }
+}
+
+/// Records a finding for every way the source's key space differs from the committed
+/// one.
+///
+/// # Why the key space is checked against a snapshot rather than a version pair
+///
+/// Every other check here compares two shapes. The key space has no second shape to
+/// compare against: it is not versioned, because it is not gated by a version number —
+/// every read goes through it, whatever version the entry is at. What stands in for the
+/// old version is the committed snapshot, so a source that disagrees with it is the
+/// signal, and `schema export` is the acknowledgement.
+///
+/// Absence is handled in both directions, because both are silent failures. A key space
+/// declared with nothing committed has no baseline at all, so no change to it can ever
+/// be detected — which looks exactly like a clean bill of health. A committed snapshot
+/// with nothing declaring it means the derive or the `#[migration]` marker was removed,
+/// so the check has quietly stopped looking.
+fn collect_key_space(project: &Project, report: &mut Report) {
+    let declared = match project.key_space_from_source() {
+        Ok(space) => space,
+        Err(error) => {
+            report.drift.push(Drift {
+                shape: "(key space)".into(),
+                version: 0,
+                severity: Severity::Denied,
+                detail: format!(
+                    "the key space could not be read from the source, so no change to it was \
+                     checked: {error}"
+                ),
+            });
+            return;
+        }
+    };
+
+    let committed = match project.committed_key_space() {
+        Ok(space) => space,
+        Err(error) => {
+            report.drift.push(Drift {
+                shape: "(key space)".into(),
+                version: 0,
+                severity: Severity::Denied,
+                detail: format!("the committed key space could not be read: {error}"),
+            });
+            return;
+        }
+    };
+
+    let Some(declared) = declared else {
+        if committed.is_some() {
+            report.drift.push(Drift {
+                shape: "(key space)".into(),
+                version: 0,
+                severity: Severity::Denied,
+                detail: format!(
+                    "{KEY_SPACE_FILE} is committed but the source no longer declares a key space, \
+                     so every key in the contract is now unchecked. Either restore the `Keyspace` \
+                     derive or the `#[migration]` variant marker, or delete the snapshot to record \
+                     that the key space is genuinely no longer tracked."
+                ),
+            });
+        }
+        return;
+    };
+
+    let Some(committed) = committed else {
+        report.drift.push(Drift {
+            shape: declared.name.clone(),
+            version: 0,
+            severity: Severity::Denied,
+            detail: format!(
+                "the source declares a key space `{}`, but no {KEY_SPACE_FILE} is committed, so \
+                 no change to it can be detected. Run `soroban-migrate schema export` to record \
+                 it as the baseline.",
+                declared.name
+            ),
+        });
+        return;
+    };
+
+    // A differing type name is not reported by `key_space_findings`, because the type
+    // name is not part of the encoding. It *is* worth saying once, since the snapshot
+    // file describes a different enum than the source does and a reader would otherwise
+    // be comparing two things they believe are the same.
+    if committed.name != declared.name {
+        report.drift.push(Drift {
+            shape: format!("{} (key space)", declared.name),
+            version: 0,
+            severity: Severity::Info,
+            detail: format!(
+                "the committed snapshot describes `{}`, and the source declares `{}`. Only \
+                 variant names are encoded, so the type rename itself changes nothing — but \
+                 confirm that these are the same enum and not two different ones.",
+                committed.name, declared.name
+            ),
+        });
+    }
+
+    for finding in key_space_findings(&committed, &declared) {
+        report.drift.push(Drift {
+            shape: format!("{} (key space)", declared.name),
+            version: 0,
+            severity: finding.severity,
+            detail: if finding.variant.is_empty() {
+                format!("{}: {}", finding.kind, finding.detail)
+            } else {
+                format!("`{}` {}: {}", finding.variant, finding.kind, finding.detail)
+            },
+        });
     }
 }
 
@@ -237,6 +354,7 @@ fn collect_version_suffix_families(committed: &SchemaSet, report: &mut Report) {
         report.drift.push(Drift {
             shape: members.join(", "),
             version: 0,
+            severity: Severity::Denied,
             detail: format!(
                 "these are versions of one shape named `{stem}`, but each registers as a shape \
                  of its own, so there is no version pair and no migration will ever be checked. \
@@ -258,11 +376,18 @@ fn version_suffix_stem(name: &str) -> Option<String> {
     Some(stem.to_string())
 }
 
-/// A shape-and-version pair whose snapshot no longer matches the source.
+/// A repository-level finding: a snapshot that no longer describes the source, or a
+/// change to the key space.
+///
+/// Carries its own severity because not every one of these is fatal. A key space that
+/// only gained a variant, or only reordered its variants, is worth saying and not worth
+/// failing a build over — whereas the same structures reporting a removal or a rename
+/// must stop the upgrade, because the alternative is unreachable entries.
 #[derive(Debug, Clone, serde::Serialize)]
 struct Drift {
     shape: String,
     version: u32,
+    severity: Severity,
     detail: String,
 }
 
@@ -298,28 +423,35 @@ struct Report {
 
 impl Report {
     fn worst_severity(&self) -> Severity {
-        let mut worst = if self.drift.is_empty() {
-            Severity::Info
-        } else {
-            Severity::Denied
+        let mut worst: Option<Severity> = None;
+        let mut bump = |severity: Severity| {
+            worst = Some(worst.map_or(severity, |w| w.max(severity)));
         };
+        for drift in &self.drift {
+            bump(drift.severity);
+        }
         for migration in &self.migrations {
             for finding in &migration.diff.findings {
-                worst = worst.max(finding.severity);
+                bump(finding.severity);
             }
             for note in &migration.notes {
-                worst = worst.max(note.severity);
+                bump(note.severity);
             }
         }
-        worst
+        worst.unwrap_or(Severity::Info)
     }
 
+    /// How many findings reach `threshold`.
+    ///
+    /// Only the ones at or above it are counted, which is what makes the refusal message
+    /// actionable: a count that included the informational findings would not match what
+    /// the gate actually objected to.
     fn count_at_least(&self, threshold: Severity) -> usize {
-        let mut count = if self.drift.is_empty() {
-            0
-        } else {
-            self.drift.len()
-        };
+        let mut count = self
+            .drift
+            .iter()
+            .filter(|d| d.severity >= threshold)
+            .count();
         for migration in &self.migrations {
             count += migration.diff.findings_at_least(threshold).len();
             count += migration
@@ -335,18 +467,24 @@ impl Report {
         crate::output::heading("storage schema compatibility");
 
         if !self.drift.is_empty() {
-            crate::output::subheading("the committed snapshots do not describe the source");
+            crate::output::subheading("the repository does not match the source");
             for drift in &self.drift {
+                // A key-space finding is about the whole contract rather than one shape
+                // at one version, so it has no version to print.
+                let subject = if drift.version == 0 {
+                    drift.shape.clone()
+                } else {
+                    format!("{} v{}", drift.shape, drift.version)
+                };
+                println!("  {:<5} {subject}: {}", drift.severity.tag(), drift.detail);
+            }
+            if self.drift.iter().any(|d| d.severity == Severity::Denied) {
+                println!();
                 println!(
-                    "  DENY  {} v{}: {}",
-                    drift.shape, drift.version, drift.detail
+                    "  Nothing below is trustworthy until this is fixed: the diffs compare \
+                     snapshots, and these snapshots are not the code."
                 );
             }
-            println!();
-            println!(
-                "  Nothing below is trustworthy until this is fixed: the diffs compare snapshots, \
-                 and these snapshots are not the code."
-            );
         }
 
         if self.migrations.is_empty() {
@@ -395,13 +533,20 @@ impl Report {
             .iter()
             .filter(|m| m.verdict.is_failure())
             .count();
+        // Only the fatal ones, so that an informational key-space finding cannot be
+        // counted as a broken snapshot.
+        let broken = self
+            .drift
+            .iter()
+            .filter(|d| d.severity == Severity::Denied)
+            .count();
         println!(
             "  {} version pair{}, {} denied, {} broken snapshot{}",
             self.migrations.len(),
             if self.migrations.len() == 1 { "" } else { "s" },
             denied,
-            self.drift.len(),
-            if self.drift.len() == 1 { "" } else { "s" },
+            broken,
+            if broken == 1 { "" } else { "s" },
         );
         println!("  verdict: {}", severity_label(self.worst_severity()));
     }
@@ -802,6 +947,196 @@ mod tests {
         // `project_with` declares `name = "Balance"` on both, so the family check has
         // nothing to object to even though the structs are called BalanceV1/V2.
         assert!(run(&project, &args()).is_ok());
+    }
+
+    /// A project with a committed key space, whose variants are given by `enum_body`.
+    ///
+    /// The key space lives in its own file, as it does in a real contract, so the tests
+    /// below can rewrite it the way a developer changing it would.
+    fn project_with_key_space(enum_body: &str) -> (tempfile::TempDir, Project) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        let mut config = crate::config::scaffold("balance", true);
+        config.schema = Some("Balance".into());
+        config.save(dir.path()).unwrap();
+        write_source(dir.path(), "    pub amount: i128,", "    pub amount: i128,");
+        write_key_space(dir.path(), enum_body);
+        let project = Project::open(dir.path()).unwrap();
+        crate::commands::schema::export_summary(&project, false).unwrap();
+        (dir, project)
+    }
+
+    fn write_key_space(dir: &std::path::Path, enum_body: &str) {
+        std::fs::write(
+            dir.join("src/keys.rs"),
+            format!(
+                "#[contracttype]\n\
+                 #[derive(Clone, Debug, Eq, PartialEq, Keyspace)]\n\
+                 pub enum DataKey {{\n{enum_body}\n}}\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    const TWO_VARIANTS: &str =
+        "    #[migration]\n    Migration(MigrationKey),\n    Balance(Address),";
+
+    #[test]
+    fn an_unchanged_key_space_does_not_block_the_gate() {
+        // The state every commit is in. If this failed, the check would be unusable.
+        let (_dir, project) = project_with_key_space(TWO_VARIANTS);
+        assert!(run(&project, &args()).is_ok());
+    }
+
+    #[test]
+    fn renaming_a_key_space_variant_is_denied_end_to_end() {
+        let (dir, project) = project_with_key_space(TWO_VARIANTS);
+        // Renamed in the source; the committed snapshot stays as the baseline.
+        write_key_space(
+            dir.path(),
+            "    #[migration]\n    Migration(MigrationKey),\n    Account(Address),",
+        );
+
+        let error = run(&project, &args()).unwrap_err();
+        assert!(matches!(error, CliError::Refused(_)));
+        assert!(error.to_string().contains("deny"), "got: {error}");
+    }
+
+    #[test]
+    fn the_key_space_denial_names_the_variant_and_explains_what_happens() {
+        // The property that matters for a reader: the report has to say which variant and
+        // why it is fatal, or it is just an unexplained red mark.
+        let (dir, project) = project_with_key_space(TWO_VARIANTS);
+        write_key_space(
+            dir.path(),
+            "    #[migration]\n    Migration(MigrationKey),\n    Account(Address),",
+        );
+
+        let mut report = Report::default();
+        collect_key_space(&project, &mut report);
+        let denied: Vec<&Drift> = report
+            .drift
+            .iter()
+            .filter(|d| d.severity == Severity::Denied)
+            .collect();
+
+        assert!(!denied.is_empty(), "a rename must be denied: {report:?}");
+        let details: Vec<&str> = denied.iter().map(|d| d.detail.as_str()).collect();
+        assert!(
+            details.iter().any(|d| d.contains("Balance")),
+            "the vanished variant must be named: {details:?}"
+        );
+        assert!(
+            details.iter().any(|d| d.contains("cannot be decoded")),
+            "and the consequence spelled out: {details:?}"
+        );
+        assert!(
+            denied.iter().all(|d| d.shape.contains("DataKey")),
+            "the report must say which enum it is about: {details:?}"
+        );
+    }
+
+    #[test]
+    fn changing_a_key_space_variants_payload_is_denied_end_to_end() {
+        let (dir, project) = project_with_key_space(TWO_VARIANTS);
+        write_key_space(
+            dir.path(),
+            "    #[migration]\n    Migration(MigrationKey),\n    Balance(Address, u32),",
+        );
+        let error = run(&project, &args()).unwrap_err();
+        assert!(error.to_string().contains("deny"), "got: {error}");
+    }
+
+    #[test]
+    fn reordering_key_space_variants_does_not_block_the_gate() {
+        // The counter-example to the test above, and the reason the classifier is written
+        // out by hand: the discriminant is the variant's *name*, so reordering is safe
+        // even though renaming is fatal. Getting this backwards would refuse a harmless
+        // change while allowing a destructive one.
+        let (dir, project) = project_with_key_space(TWO_VARIANTS);
+        write_key_space(
+            dir.path(),
+            "    Balance(Address),\n    #[migration]\n    Migration(MigrationKey),",
+        );
+
+        assert!(
+            run(&project, &args()).is_ok(),
+            "reordering variants must not be denied"
+        );
+
+        // ...and it is still mentioned, so a reviewer does not have to work it out.
+        let mut report = Report::default();
+        collect_key_space(&project, &mut report);
+        assert!(
+            report
+                .drift
+                .iter()
+                .any(|d| d.severity == Severity::Info && d.detail.contains("reordered")),
+            "a reorder should be reported as information: {:?}",
+            report.drift
+        );
+    }
+
+    #[test]
+    fn adding_a_key_space_variant_does_not_block_the_gate() {
+        let (dir, project) = project_with_key_space(TWO_VARIANTS);
+        write_key_space(
+            dir.path(),
+            "    #[migration]\n    Migration(MigrationKey),\n    Balance(Address),\n    Admin,",
+        );
+        assert!(run(&project, &args()).is_ok());
+    }
+
+    #[test]
+    fn a_key_space_that_was_never_exported_is_denied() {
+        // Nothing to diff against means no check at all, which looks identical to a pass.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        let mut config = crate::config::scaffold("balance", true);
+        config.schema = Some("Balance".into());
+        config.save(dir.path()).unwrap();
+        write_source(dir.path(), "    pub amount: i128,", "    pub amount: i128,");
+        write_key_space(dir.path(), TWO_VARIANTS);
+        let project = Project::open(dir.path()).unwrap();
+
+        let mut report = Report::default();
+        collect_key_space(&project, &mut report);
+        assert_eq!(report.drift.len(), 1);
+        assert_eq!(report.drift[0].severity, Severity::Denied);
+        assert!(
+            report.drift[0].detail.contains("schema export"),
+            "the fix must be named: {}",
+            report.drift[0].detail
+        );
+    }
+
+    #[test]
+    fn deleting_the_key_space_declaration_is_denied_rather_than_silently_stopping_the_check() {
+        // The quiet failure this guards: remove the derive or the marker, and the check
+        // stops looking at the key space without saying so.
+        let (dir, project) = project_with_key_space(TWO_VARIANTS);
+        std::fs::write(
+            dir.path().join("src/keys.rs"),
+            "#[contracttype]\npub enum DataKey {\n    Unrelated,\n}\n",
+        )
+        .unwrap();
+
+        let mut report = Report::default();
+        collect_key_space(&project, &mut report);
+        assert_eq!(report.drift.len(), 1);
+        assert_eq!(report.drift[0].severity, Severity::Denied);
+    }
+
+    #[test]
+    fn a_committed_key_space_snapshot_is_not_read_as_a_schema() {
+        // `keyspace.json` sits in the same directory as the schema snapshots and is not a
+        // plan, so it has to be excluded by name — otherwise it is parsed as a schema and
+        // every command fails with a confusing missing-field error.
+        let (_dir, project) = project_with_key_space(TWO_VARIANTS);
+        assert!(project.key_space_path().is_file());
+        let set = project.schema_set().unwrap();
+        assert_eq!(set.names().count(), 1);
+        assert_eq!(set.names().collect::<Vec<_>>(), vec!["Balance"]);
     }
 
     #[test]
