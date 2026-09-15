@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "name": "Stats",
+  "note": "The counter entry, added in version 2 to demonstrate a second, independent field shape in the same contract.  Nothing migrates it: it is written for the first time at version 2, so the version-2 index knows about it and no earlier version ever saw it.",
+  "fields": [
+    {
+      "name": "total",
+      "declared": "i128",
+      "base": "i128",
+      "optional": false
+    }
+  ]
+}
