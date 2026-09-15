@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Everything that can be checked without a Stellar toolchain.
+  check:
+    name: fmt, clippy, test, doc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned to the workspace's `rust-version` so CI cannot silently start
+      # testing a different compiler than the one the crate claims to support.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.91.0"
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      # `-D warnings` is scoped to these steps rather than set in `env`, so it
+      # cannot turn a third-party dependency's warning into a build failure.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        # The suite includes the resource-limit measurements, which deliberately
+        # push a ledger past its budget and are the slowest part of the run.
+        run: cargo test --workspace
+
+      - name: Documentation
+        run: cargo doc --workspace --no-deps --document-private-items
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  # The adoption gate: the example contract is a real user of the tool, so the
+  # tool is run against it exactly as a user would. This is what catches the tool
+  # and the example drifting apart, and it fails when either the committed
+  # snapshots or the generated migration is out of date with `src/`.
+  example:
+    name: example contract adoption
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.91.0"
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `check` exits 2 when a change would lose data or make existing entries
+      # unreadable, and 1 when the committed snapshots do not match `src/`. Both
+      # are failures here, which is the point: a schema change that skips the
+      # snapshot step is the silent breakage this tool exists to prevent.
+      - name: Compatibility gate
+        run: cargo run --quiet -p soroban-migrate-cli -- check
+        working-directory: examples/vault
+
+      # The generated migration is committed, so regeneration must be a no-op.
+      # If this fails, `cargo run -p soroban-migrate-cli -- generate 1 2 --force`
+      # output was not committed alongside the change that caused it.
+      - name: Generated migration is up to date
+        # `types_module` and `keyspace` come from `soroban-migrate.toml`, so
+        # regenerating here uses the same inputs the committed file was made with.
+        run: |
+          cargo run --quiet -p soroban-migrate-cli -- generate 1 2 --force
+          git diff --exit-code -- migrations/
+        working-directory: examples/vault
+
+  # Produces the artifact that actually gets deployed. Needs the Stellar CLI:
+  # `soroban-sdk` refuses to build for Wasm without a build system that can shake
+  # the contract spec, so plain `cargo build` is not a substitute.
+  contract:
+    name: contract wasm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.91.0"
+          # `wasm32-unknown-unknown` is rejected outright on Rust 1.82+.
+          targets: wasm32v1-none
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Pinned rather than floating: `soroban-sdk` requires stellar-cli >= 25.2.0
+      # to build, and an unpinned upgrade could change the emitted Wasm hash.
+      - uses: stellar/stellar-cli@v28.0.0
+
+      - name: Build
+        run: stellar contract build --package vault-example
+
+      # A build that silently produced an empty or absent artifact would otherwise
+      # pass, since `stellar` reports success on the build itself. The output path
+      # depends on which profile `stellar` selects, so find it rather than assume it.
+      - name: Artifact is a contract
+        run: |
+          wasm=$(find target -name 'vault_example.wasm' -type f | head -n1)
+          test -n "$wasm"
+          test -s "$wasm"
+          echo "wasm: $wasm ($(wc -c < "$wasm") bytes)"
