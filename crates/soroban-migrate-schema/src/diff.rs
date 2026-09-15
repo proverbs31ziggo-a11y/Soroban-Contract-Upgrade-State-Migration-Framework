@@ -22,7 +22,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::SchemaError;
-use crate::model::{normalize_type, Schema};
+use crate::model::{normalize_type, KeySpace, Schema};
 use crate::plan::MigrationPlan;
 
 /// How bad a finding is.
@@ -124,6 +124,164 @@ impl ChangeKind {
             }
         }
     }
+}
+
+/// One finding about a contract's key space.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeySpaceFinding {
+    /// The variant involved, or empty for a finding about the enum as a whole.
+    pub variant: String,
+    /// What happened, in a few words, for the report's middle column.
+    pub kind: String,
+    /// How bad it is.
+    pub severity: Severity,
+    /// What the operator must know, in one paragraph.
+    pub detail: String,
+}
+
+/// Classifies every difference between two versions of a contract's key space.
+///
+/// # Why this is not part of [`diff`]
+///
+/// A key space is not a storage shape. It is the enum every storage *key* is encoded
+/// from, so changing it does not alter what an entry contains — it alters which entry a
+/// key refers to. The field-level diff compares structs and cannot see it, which is why
+/// a variant rename used to be reported as a safe upgrade.
+///
+/// # What is dangerous, and what is not
+///
+/// `#[contracttype]` encodes an enum as a vector whose first element is the **name** of
+/// the variant, as a `Symbol`. Reading one resolves that symbol against a generated list
+/// of case names and dispatches on the position it finds. The generated list and the
+/// dispatch arms both come from declaration order, so they stay aligned — and that has
+/// two consequences that are opposites, which is the whole reason this function is
+/// written out rather than reduced to a set comparison:
+///
+/// * **Reordering variants is safe.** No stored discriminant changes meaning. This is
+///   the intuitive fear and it is not a real risk. It is still reported, at
+///   [`Severity::Info`], because the next reader will want it settled rather than
+///   silently unmentioned.
+/// * **Renaming a variant is fatal.** Stored keys carry the old name, the lookup fails,
+///   and every existing entry becomes undecodable. Not misread — unreadable. This is a
+///   removal and an addition that happen to share a position.
+/// * **Changing a variant's payload is fatal** for the same reason: the encoded vector
+///   after the discriminant changes, so old keys no longer decode.
+/// * **Removing a variant strands the entries written under it.** Those keys can never
+///   be read again, so they can never be migrated either.
+/// * **Adding a variant is safe.** No existing key refers to it.
+/// * **Renaming the enum's type is safe.** Only variant names are encoded.
+///
+/// Renames are reported as a removal plus an addition rather than as a single `Renamed`
+/// finding, because the two are indistinguishable from the encoding's point of view and
+/// claiming to recognise the pair would be a guess. The removal's detail says so.
+#[must_use]
+pub fn key_space_findings(old: &KeySpace, new: &KeySpace) -> Vec<KeySpaceFinding> {
+    let mut findings = Vec::new();
+
+    for variant in &new.variants {
+        let Some(previous) = old.variant(&variant.name) else {
+            findings.push(KeySpaceFinding {
+                variant: variant.name.clone(),
+                kind: "variant added".into(),
+                severity: Severity::Info,
+                detail: format!(
+                    "`{}::{}` is new. No stored key refers to it, so nothing needs \
+                     migrating and entries written under it cannot collide with existing \
+                     ones.",
+                    new.name, variant.name
+                ),
+            });
+            continue;
+        };
+
+        if previous.normalized_payload() != variant.normalized_payload() {
+            findings.push(KeySpaceFinding {
+                variant: variant.name.clone(),
+                kind: "payload changed".into(),
+                severity: Severity::Denied,
+                detail: format!(
+                    "`{}::{}` now carries `{}` where it carried `{}`. A key is encoded as a \
+                     vector whose discriminant is the variant's *name*, so changing the \
+                     payload changes everything after it: every key already written under \
+                     this variant fails to decode, and a key that cannot be decoded names no \
+                     entry — so the entries it referred to become unreachable, not merely \
+                     unreadable. Give the new payload its own variant name and migrate the \
+                     entries into it, or revert this change.",
+                    new.name,
+                    variant.name,
+                    variant.payload.as_deref().unwrap_or("nothing"),
+                    previous.payload.as_deref().unwrap_or("nothing")
+                ),
+            });
+        }
+
+        if previous.migration != variant.migration {
+            let (from, to) = if variant.migration {
+                ("not marked", "marked")
+            } else {
+                ("marked", "not marked")
+            };
+            findings.push(KeySpaceFinding {
+                variant: variant.name.clone(),
+                kind: "#[migration] moved".into(),
+                severity: Severity::Denied,
+                detail: format!(
+                    "`{}::{}` is now {to} `#[migration]`; it was {from}. That marker is how the \
+                     framework finds its own bookkeeping keys — the recorded schema version, \
+                     the in-flight cursor, and the pages of the key index. Moving it changes \
+                     which variant those keys are written under, so a migration in flight \
+                     would lose its cursor and a completed one its recorded version.",
+                    new.name, variant.name
+                ),
+            });
+        }
+    }
+
+    // Removals last, so the report reads as "here is the key space, here is what it no
+    // longer has", matching how the field-level diff orders its findings.
+    for variant in &old.variants {
+        if new.variant(&variant.name).is_some() {
+            continue;
+        }
+        findings.push(KeySpaceFinding {
+            variant: variant.name.clone(),
+            kind: "variant removed".into(),
+            severity: Severity::Denied,
+            detail: format!(
+                "`{}::{}` is gone. A key written under it carries a name that is no longer in \
+                 the generated list of cases, so it cannot be decoded and the entry it named \
+                 cannot be reached or migrated. If this is a *rename*, keep the old variant \
+                 declared until every entry has been rewritten out of it — the encoding \
+                 records the variant's name, so a rename is a removal plus an addition \
+                 rather than a no-op.",
+                old.name, variant.name
+            ),
+        });
+    }
+
+    // Only worth reporting when nothing else changed, since a reordering alongside a real
+    // change is noise on top of a finding that already requires action.
+    if findings.is_empty() {
+        let before: Vec<&str> = old.variants.iter().map(|v| v.name.as_str()).collect();
+        let after: Vec<&str> = new.variants.iter().map(|v| v.name.as_str()).collect();
+        if before != after {
+            findings.push(KeySpaceFinding {
+                variant: String::new(),
+                kind: "reordered".into(),
+                severity: Severity::Info,
+                detail: format!(
+                    "`{}` declares its variants in a different order. This is safe: the \
+                     discriminant on the wire is the variant's name, and the generated case \
+                     list and dispatch arms are both built from declaration order, so they \
+                     move together. Reported only so that a reviewer does not have to work \
+                     that out from first principles.",
+                    new.name
+                ),
+            });
+        }
+    }
+
+    findings
 }
 
 /// One classified change.
