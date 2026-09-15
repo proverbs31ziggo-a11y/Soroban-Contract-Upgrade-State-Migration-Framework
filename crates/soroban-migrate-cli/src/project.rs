@@ -24,9 +24,9 @@
 
 use std::path::{Path, PathBuf};
 
-use soroban_migrate_schema::model::{Schema, SchemaSet};
+use soroban_migrate_schema::model::{KeySpace, Schema, SchemaSet};
 use soroban_migrate_schema::plan::MigrationPlan;
-use soroban_migrate_schema::{plan_file_name, schema_file_name};
+use soroban_migrate_schema::{plan_file_name, schema_file_name, KEY_SPACE_FILE};
 use walkdir::WalkDir;
 
 use crate::config::Config;
@@ -100,6 +100,11 @@ impl Project {
         self.migrations_dir().join(plan_file_name(name, from, to))
     }
 
+    /// The path of the committed key-space snapshot.
+    pub fn key_space_path(&self) -> PathBuf {
+        self.migrations_dir().join(KEY_SPACE_FILE)
+    }
+
     /// The path of the generated migration for `from -> to` of `name`.
     pub fn migration_path(&self, name: &str, from: u32, to: u32) -> PathBuf {
         self.migrations_dir()
@@ -147,8 +152,89 @@ impl Project {
     /// [`CliError::Usage`] for a file that is not valid Rust, and for a
     /// `#[storage_schema]` attribute that does not parse. Both name the file.
     pub fn schemas_from_source(&self) -> Result<SchemaSet> {
+        let sources = self.rust_sources()?;
+        if sources.is_empty() {
+            return Err(CliError::Missing(format!(
+                "no Rust source found under the configured `source` paths. Set `source` in {} \
+                 to the directory holding the contract.",
+                crate::config::FILE_NAME
+            )));
+        }
+
         let mut set = SchemaSet::new();
-        let mut files = 0usize;
+        for (path, text) in &sources {
+            for schema in
+                soroban_migrate_schema::parse::parse_source(&path.display().to_string(), text)?
+            {
+                set.insert(schema)?;
+            }
+        }
+        Ok(set)
+    }
+
+    /// The key space declared in the project's source, if there is one.
+    ///
+    /// Absence is not an error: the framework can be adopted for the schemas alone, and
+    /// a project that has not adopted the `Keyspace` derive has nothing to compare.
+    ///
+    /// # Errors
+    ///
+    /// [`CliError::Usage`] when the source declares more than one key space, naming the
+    /// files. A contract reaches storage through exactly one enum, so two of them is a
+    /// mistake in the source rather than a situation with a defensible resolution — and
+    /// choosing one silently would mean checking the wrong key space.
+    pub fn key_space_from_source(&self) -> Result<Option<KeySpace>> {
+        let mut found: Vec<(String, KeySpace)> = Vec::new();
+        for (path, text) in self.rust_sources()? {
+            if let Some(space) =
+                soroban_migrate_schema::parse::parse_key_space(&path.display().to_string(), &text)?
+            {
+                found.push((path.display().to_string(), space));
+            }
+        }
+
+        match found.len() {
+            0 => Ok(None),
+            1 => Ok(Some(found.remove(0).1)),
+            _ => Err(CliError::Usage(format!(
+                "{} key spaces declared. A contract reaches storage through exactly one enum, \
+                 so these cannot all be it: {}. Remove the `#[migration]` marker or the \
+                 `Keyspace` derive from the ones that are not the contract's key space.",
+                found.len(),
+                found
+                    .iter()
+                    .map(|(path, space)| format!("`{path}` declares `{}`", space.name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))),
+        }
+    }
+
+    /// The committed key space, if one has been exported.
+    ///
+    /// # Errors
+    ///
+    /// [`CliError::Usage`] when the file exists but does not parse as one.
+    pub fn committed_key_space(&self) -> Result<Option<KeySpace>> {
+        let path = self.key_space_path();
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let text = std::fs::read_to_string(&path).map_err(|e| CliError::io(path.display(), e))?;
+        let space = KeySpace::from_json(&text)
+            .map_err(|e| CliError::Usage(format!("{}: {e}", path.display())))?;
+        Ok(Some(space))
+    }
+
+    /// Every Rust source file under the configured source paths, in a deterministic
+    /// order, as `(path, text)`.
+    ///
+    /// Factored out so the schema scan and the key-space scan read the same tree the same
+    /// way. Two walks would eventually disagree about which files to skip, and the
+    /// symptom would be a key space that is checked in one command and invisible in
+    /// another.
+    fn rust_sources(&self) -> Result<Vec<(PathBuf, String)>> {
+        let mut sources = Vec::new();
         for root in self.config.source_paths(&self.root) {
             if !root.exists() {
                 return Err(CliError::Missing(format!(
@@ -170,25 +256,13 @@ impl Project {
                 {
                     continue;
                 }
-                files += 1;
-                let path = entry.path();
+                let path = entry.path().to_path_buf();
                 let text =
-                    std::fs::read_to_string(path).map_err(|e| CliError::io(path.display(), e))?;
-                for schema in
-                    soroban_migrate_schema::parse::parse_source(&path.display().to_string(), &text)?
-                {
-                    set.insert(schema)?;
-                }
+                    std::fs::read_to_string(&path).map_err(|e| CliError::io(path.display(), e))?;
+                sources.push((path, text));
             }
         }
-        if files == 0 {
-            return Err(CliError::Missing(format!(
-                "no Rust source found under the configured `source` paths. Set `source` in {} \
-                 to the directory holding the contract.",
-                crate::config::FILE_NAME
-            )));
-        }
-        Ok(set)
+        Ok(sources)
     }
 
     /// Loads the plan for `from -> to`, if one has been committed.
@@ -244,6 +318,38 @@ impl Project {
                 path.display(),
                 schema.version
             )));
+        }
+        std::fs::create_dir_all(self.migrations_dir())
+            .map_err(|e| CliError::io(self.migrations_dir().display(), e))?;
+        std::fs::write(&path, text).map_err(|e| CliError::io(path.display(), e))?;
+        Ok(WriteOutcome::Written(path))
+    }
+
+    /// Writes the key-space snapshot, overwriting a differing one.
+    ///
+    /// # Why this does not refuse, when [`Self::write_schema`] does
+    ///
+    /// A *schema* snapshot changing without its version changing is always a mistake,
+    /// because the version number is what the contract gates reads on — so refusing is
+    /// the only safe default. A key space has no version to bump: every read goes through
+    /// it, and the snapshot exists precisely so that a change shows up for review. The
+    /// deliberate act of running `schema export` *is* the acknowledgement, and the review
+    /// is the diff of this file in the pull request. Refusing here would mean the one
+    /// legitimate way to record a reviewed key-space change was to pass `--force`, which
+    /// trains people to pass `--force`.
+    ///
+    /// # Errors
+    ///
+    /// [`CliError::Io`] when the file cannot be written.
+    pub fn write_key_space(&self, space: &KeySpace) -> Result<WriteOutcome> {
+        let path = self.key_space_path();
+        let text = space.to_json();
+        if path.is_file() {
+            let existing =
+                std::fs::read_to_string(&path).map_err(|e| CliError::io(path.display(), e))?;
+            if existing == text {
+                return Ok(WriteOutcome::Unchanged(path));
+            }
         }
         std::fs::create_dir_all(self.migrations_dir())
             .map_err(|e| CliError::io(self.migrations_dir().display(), e))?;
@@ -311,9 +417,16 @@ impl WriteOutcome {
     }
 }
 
-/// Whether a path is a schema snapshot rather than a plan or an unrelated JSON file.
+/// Whether a path is a schema snapshot rather than a plan, the key space, or an
+/// unrelated JSON file.
+///
+/// The key space has to be excluded by name: it is a `.json` file in the same directory
+/// and is not a plan, so without this it would be read as a schema snapshot and fail to
+/// parse as one, taking down `check` with a confusing error about a missing field.
 fn is_schema_snapshot(path: &Path) -> bool {
-    path.extension().is_some_and(|e| e == "json") && !path.to_string_lossy().ends_with(".plan.json")
+    path.extension().is_some_and(|e| e == "json")
+        && !path.to_string_lossy().ends_with(".plan.json")
+        && path.file_name().is_none_or(|n| n != KEY_SPACE_FILE)
 }
 
 /// Whether a directory should be skipped while scanning for schemas.

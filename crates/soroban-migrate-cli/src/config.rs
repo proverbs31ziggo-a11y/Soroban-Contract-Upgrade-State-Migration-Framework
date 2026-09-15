@@ -173,9 +173,38 @@ pub struct Network {
     /// next one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ledger: Option<u32>,
+
+    /// Wall-clock limit for a single `stellar` invocation, in seconds.
+    ///
+    /// Defaults to [`crate::stellar::DEFAULT_TIMEOUT_SECONDS`]. Set `0` to wait
+    /// indefinitely, which is occasionally right for an endpoint that is merely slow and
+    /// never right for an unattended run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stellar_timeout_seconds: Option<u64>,
 }
 
 impl Network {
+    /// How long one `stellar` invocation may take.
+    ///
+    /// # Why there is a limit at all
+    ///
+    /// A rejected transaction comes back in seconds. A *stalled* endpoint does not come
+    /// back at all, and the distinction matters because the two call for opposite
+    /// responses: a rejection is safe to retry, and a stall means it is unknown whether
+    /// the batch landed. `std::process::Command` has no deadline of its own, so without
+    /// this a stalled RPC leaves `run` blocked at a prompt that looks like a slow batch,
+    /// with the operator unable to tell which case they are in.
+    pub fn stellar_timeout(&self) -> Option<std::time::Duration> {
+        match self.stellar_timeout_seconds {
+            // An explicit zero is the documented way to say "no limit".
+            Some(0) => None,
+            Some(seconds) => Some(std::time::Duration::from_secs(seconds)),
+            None => Some(std::time::Duration::from_secs(
+                crate::stellar::DEFAULT_TIMEOUT_SECONDS,
+            )),
+        }
+    }
+
     /// How to name this network to the `stellar` CLI.
     ///
     /// # Errors

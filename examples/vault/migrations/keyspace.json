@@ -1,0 +1,23 @@
+{
+  "name": "DataKey",
+  "variants": [
+    {
+      "name": "Migration",
+      "payload": "MigrationKey",
+      "migration": true
+    },
+    {
+      "name": "Balance",
+      "payload": "Address",
+      "migration": false
+    },
+    {
+      "name": "Stats",
+      "migration": false
+    },
+    {
+      "name": "Admin",
+      "migration": false
+    }
+  ]
+}
