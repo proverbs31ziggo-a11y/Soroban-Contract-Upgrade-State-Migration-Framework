@@ -1,11 +1,11 @@
 # soroban-migrate
 
-The on-chain half of the [`soroban-migrate`](https://github.com/soroban-migrate/soroban-migrate)
+The on-chain half of the [`soroban-migrate`](https://github.com/proverbs31ziggo-a11y/Soroban-Contract-Upgrade-State-Migration-Framework)
 framework: everything a *contract* needs to version its storage and migrate it.
 
 `no_std`, no `alloc`-dependent surprises, and no host function newer than protocol 26
 in its own code — the protocol-28 requirement comes from the `#[contracttype]`
-decoding it depends on. See [`docs/cap-85-86.md`](https://github.com/soroban-migrate/soroban-migrate/blob/main/docs/cap-85-86.md).
+decoding it depends on. See [`docs/cap-85-86.md`](https://github.com/proverbs31ziggo-a11y/Soroban-Contract-Upgrade-State-Migration-Framework/blob/main/docs/cap-85-86.md).
 
 ## The modules
 
@@ -53,7 +53,7 @@ changes need the tolerant shadow struct that `soroban-migrate generate` writes.
 
 Both fail silently if you get them wrong, which is why they are documented on the
 items rather than only here. The full explanation is in the
-[root README](https://github.com/soroban-migrate/soroban-migrate#readme).
+[root README](https://github.com/proverbs31ziggo-a11y/Soroban-Contract-Upgrade-State-Migration-Framework#readme).
 
 ## License
 

@@ -1,6 +1,6 @@
 # soroban-migrate-macros
 
-The derives for [`soroban-migrate`](https://github.com/soroban-migrate/soroban-migrate).
+The derives for [`soroban-migrate`](https://github.com/proverbs31ziggo-a11y/Soroban-Contract-Upgrade-State-Migration-Framework).
 Each one removes boilerplate that is easy to get subtly wrong and impossible to notice
 when it is.
 
