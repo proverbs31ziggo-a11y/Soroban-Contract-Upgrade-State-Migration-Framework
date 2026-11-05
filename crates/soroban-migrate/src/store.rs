@@ -17,22 +17,36 @@
 //! the stored version otherwise. There is no way to call it and get the index out
 //! of step with the data.
 //!
-//! ```no_run
-//! # use soroban_migrate::key::MigrationKey;
-//! # use soroban_migrate_macros::Keyspace;
-//! # use soroban_sdk::{contracttype, Env};
+//! ```
+//! use soroban_migrate::store;
+//! # use soroban_migrate::key::{Keyspace, MigrationKey};
+//! # use soroban_sdk::testutils::Address as _;
+//! # use soroban_sdk::{contract, contracttype, Address, Env, IntoVal, Val};
 //! #
 //! # #[contracttype]
-//! # #[derive(Clone, Keyspace)]
 //! # pub enum DataKey {
-//! #     #[migration]
 //! #     Migration(MigrationKey),
+//! #     Balance(Address),
 //! # }
 //! #
-//! # let env = Env::default();
-//! # let val = ();
+//! # impl Keyspace for DataKey {
+//! #     fn wrap(env: &Env, key: MigrationKey) -> Val {
+//! #         DataKey::Migration(key).into_val(env)
+//! #     }
+//! # }
 //! #
-//! store::put(&env, &DataKey::Migration(MigrationKey), &val);
+//! # #[contract]
+//! # pub struct Vault;
+//! #
+//! # let env = Env::default();
+//! # let id = env.register(Vault, ());
+//! # let owner = Address::generate(&env);
+//! # let value: i128 = 100;
+//! # env.as_contract(&id, || {
+//! // Instead of `env.storage().persistent().set(&key, &value)`:
+//! store::put::<DataKey, _>(&env, &DataKey::Balance(owner).into_val(&env), &value);
+//! # assert_eq!(soroban_migrate::index::len::<DataKey>(&env, 1), 1);
+//! # });
 //! ```
 //!
 //! # The escape hatch
