@@ -195,6 +195,7 @@ pub fn run(project: &Project, args: &Args) -> Result<()> {
             args.snapshot.display()
         )));
     }
+    check_snapshot_protocol(&args.snapshot, HOST_PROTOCOL)?;
     let (network, entries) = super::status::require_context(project)?;
 
     // Validated here rather than inside the host, where an unusable address surfaces as a
@@ -322,6 +323,52 @@ pub struct ForkedContract {
     started: Cell<bool>,
 }
 
+/// The ledger protocol the bundled host runs, and so the only one it can load.
+pub const HOST_PROTOCOL: u32 = soroban_env_host::meta::INTERFACE_VERSION.protocol;
+
+/// Refuses a snapshot taken at a protocol the bundled host cannot load.
+///
+/// The host checks this itself, but it does so by panicking inside the SDK with
+/// "ledger protocol version too new for host", which reads like a crash in this tool.
+/// Found on Testnet: a network upgrade is all it takes to make every fresh snapshot
+/// unloadable until this crate moves to the matching SDK.
+///
+/// # Errors
+///
+/// [`CliError::Io`] when the file cannot be read, [`CliError::Usage`] when it is not a
+/// snapshot, and [`CliError::Refused`] when its protocol is not `host`.
+pub fn check_snapshot_protocol(path: &std::path::Path, host: u32) -> Result<()> {
+    let text = std::fs::read_to_string(path).map_err(|e| CliError::io(path.display(), e))?;
+    let protocol = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|v| {
+            v.get("protocol_version")
+                .and_then(serde_json::Value::as_u64)
+        })
+        .ok_or_else(|| {
+            CliError::Usage(format!(
+                "{} is not a ledger snapshot: it has no `protocol_version`. Produce one with \
+                 `stellar snapshot create`.",
+                path.display()
+            ))
+        })?;
+    if protocol == u64::from(host) {
+        return Ok(());
+    }
+    let direction = if protocol > u64::from(host) {
+        "newer"
+    } else {
+        "older"
+    };
+    Err(CliError::Refused(format!(
+        "{} was taken at ledger protocol {protocol}, which is {direction} than the protocol \
+         {host} this build of soroban-migrate can replay. The network has moved on from the \
+         SDK this tool is built against; a dry run needs a soroban-migrate built for protocol \
+         {protocol}.",
+        path.display()
+    )))
+}
+
 impl ForkedContract {
     /// Loads a snapshot into a host and points it at a contract.
     ///
@@ -443,6 +490,35 @@ mod tests {
                 ledger_entries: u64::from(visited) * 2,
             })
         }
+    }
+
+    #[test]
+    fn a_snapshot_at_the_host_protocol_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("snapshot.json");
+        std::fs::write(&path, format!(r#"{{"protocol_version": {HOST_PROTOCOL}}}"#)).unwrap();
+        check_snapshot_protocol(&path, HOST_PROTOCOL).unwrap();
+    }
+
+    #[test]
+    fn a_snapshot_from_a_newer_network_is_refused_with_both_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("snapshot.json");
+        std::fs::write(&path, r#"{"protocol_version": 30}"#).unwrap();
+        let err = check_snapshot_protocol(&path, 28).unwrap_err();
+        assert!(matches!(err, CliError::Refused(_)), "{err}");
+        let text = err.to_string();
+        assert!(text.contains("protocol 30"), "{text}");
+        assert!(text.contains("newer than the protocol 28"), "{text}");
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_snapshot_is_a_usage_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("snapshot.json");
+        std::fs::write(&path, "{}").unwrap();
+        let err = check_snapshot_protocol(&path, 28).unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)), "{err}");
     }
 
     #[test]
