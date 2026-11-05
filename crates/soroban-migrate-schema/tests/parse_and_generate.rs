@@ -258,6 +258,51 @@ fn an_optional_addition_without_an_initialiser_generates_no_write() {
 }
 
 #[test]
+fn a_value_of_another_shape_is_skipped_rather_than_decoded_with_get() {
+    // The key index holds every key a contract registered, not only this shape's.
+    // `storage.get::<Val, T>` panics when the stored value is not a `T`, which aborts
+    // the whole batch: found on Testnet, where the example's `Stats` entry sat in the
+    // index next to the balances. The value has to be read raw and decoded fallibly.
+    let from = schema(1, &[("owner", "Address")]);
+    let to = schema(2, &[("owner", "Address"), ("frozen", "Option<bool>")]);
+    let mut plan = MigrationPlan::new(1, 2);
+    plan.init.insert("frozen".into(), "false".into());
+    let code = generate_for(&from, &to, &plan);
+
+    assert!(
+        !code.contains("storage.get::<Val, AccountV2>"),
+        "got:\n{code}"
+    );
+    assert!(
+        code.contains("storage.get::<Val, Val>(key)"),
+        "got:\n{code}"
+    );
+    assert!(
+        code.contains("AccountV2::try_from_val(env, &raw)"),
+        "got:\n{code}"
+    );
+    assert!(
+        code.contains("Err(_) => return Ok(EntryOutcome::Skipped)"),
+        "got:\n{code}"
+    );
+
+    // The same holds for the tolerant shadow a rename needs.
+    let a = schema(1, &[("body", "String")]);
+    let b = schema(2, &[("note", "Option<String>")]);
+    let mut plan = MigrationPlan::new(1, 2);
+    plan.renamed.insert("body".into(), "note".into());
+    let out = generated(&a, &b, &plan);
+    assert!(
+        !out.contains("storage.get::<Val, AccountV1ToV2Consumed>"),
+        "{out}"
+    );
+    assert!(
+        out.contains("AccountV1ToV2Consumed::try_from_val(env, &raw)"),
+        "{out}"
+    );
+}
+
+#[test]
 fn a_rename_gets_a_tolerant_shadow_struct() {
     let a = schema(1, &[("body", "String")]);
     let b = schema(2, &[("note", "Option<String>")]);

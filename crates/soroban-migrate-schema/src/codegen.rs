@@ -400,22 +400,37 @@ fn render(
             "        // Decoding with the new type is what makes this work: keys the new shape does\n\
              \x20       // not declare are discarded, and keys it declares but the entry lacks arrive as\n\
              \x20       // `None` for an `Option` field.\n\
-             \x20       let mut entry: {to_type} = match storage.get::<Val, {to_type}>(key) {{\n\
-             \x20           Some(e) => e,\n\
+             \x20       //\n\
+             \x20       // Read the raw value, then decode it. The index holds every key the contract\n\
+             \x20       // registered, so a value of another shape is skipped rather than allowed to\n\
+             \x20       // panic in `get` and abort the whole batch.\n\
+             \x20       let raw: Val = match storage.get::<Val, Val>(key) {{\n\
+             \x20           Some(v) => v,\n\
              \x20           None => return Ok(EntryOutcome::Skipped),\n\
+             \x20       }};\n\
+             \x20       let mut entry: {to_type} = match {to_type}::try_from_val(env, &raw) {{\n\
+             \x20           Ok(e) => e,\n\
+             \x20           Err(_) => return Ok(EntryOutcome::Skipped),\n\
              \x20       }};\n\
              \x20       let mut changed = false;\n"
         ));
         } else {
             out.push_str(&format!(
-                "        let mut entry: {to_type} = match storage.get::<Val, {to_type}>(key) {{\n\
-             \x20           Some(e) => e,\n\
+                "        // Read the raw value, then decode it. The index holds every key the contract\n\
+             \x20       // registered, so a value of another shape is skipped rather than allowed to\n\
+             \x20       // panic in `get` and abort the whole batch.\n\
+             \x20       let raw: Val = match storage.get::<Val, Val>(key) {{\n\
+             \x20           Some(v) => v,\n\
              \x20           None => return Ok(EntryOutcome::Skipped),\n\
              \x20       }};\n\
+             \x20       let mut entry: {to_type} = match {to_type}::try_from_val(env, &raw) {{\n\
+             \x20           Ok(e) => e,\n\
+             \x20           Err(_) => return Ok(EntryOutcome::Skipped),\n\
+             \x20       }};\n\
              \x20       let mut changed = false;\n\
-             \x20       let old: {} = match storage.get::<Val, {}>(key) {{\n\
-             \x20           Some(o) => o,\n\
-             \x20           None => return Ok(EntryOutcome::Skipped),\n\
+             \x20       let old: {} = match {}::try_from_val(env, &raw) {{\n\
+             \x20           Ok(o) => o,\n\
+             \x20           Err(_) => return Ok(EntryOutcome::Skipped),\n\
              \x20       }};\n",
                 shadow_name(name),
                 shadow_name(name),
