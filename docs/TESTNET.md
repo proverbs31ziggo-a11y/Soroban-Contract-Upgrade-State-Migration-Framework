@@ -1,0 +1,148 @@
+# Testnet run
+
+The first time `soroban-migrate` drove a migration on a live network: 5 November 2026,
+Stellar Testnet at **protocol 30**, using `stellar-cli` 28.0.0 and the `examples/vault`
+contract built with `stellar contract build`.
+
+The run found two bugs that 288 passing tests had not. Both are fixed; the details are
+below, because what the tests missed is the useful part.
+
+## The migration that worked
+
+Contract [`CBYQ3PIO75UF4ZHZC6AZ4EU33WZYO7FNVTHESWUH4ZSK327YW72VOBRW`](https://stellar.expert/explorer/testnet/contract/CBYQ3PIO75UF4ZHZC6AZ4EU33WZYO7FNVTHESWUH4ZSK327YW72VOBRW),
+built from the fixed source.
+
+| step | how | transaction |
+| --- | --- | --- |
+| deploy | `stellar contract deploy` | [`76e11442…`](https://stellar.expert/explorer/testnet/tx/76e11442a81a2fea0c07be75acc1589b3252330c66bea27ea04e3bf377003ff0) |
+| initialize at schema v1 | `stellar contract invoke -- initialize` | [`9b75ff39…`](https://stellar.expert/explorer/testnet/tx/9b75ff39d0f4e99bc5568a0acd9d166b28dbd22c47daa84b463d9a40136d4155) |
+| three deposits, from three accounts | `stellar contract invoke -- deposit` | [`959a26a5…`](https://stellar.expert/explorer/testnet/tx/959a26a5975b7045be54435a3177bd7f7e89eaf4b290706bbc33c1c6d3cf7fc5), [`605c5359…`](https://stellar.expert/explorer/testnet/tx/605c53591ecb99cf03c3c04ec1e9e5d39bc9016e5554b3cd93cd79a418a070a0), [`11e8813d…`](https://stellar.expert/explorer/testnet/tx/11e8813d78a2632464b41a742e8ba01a82c86d0c3c9b642b75cdf6f038b60d68) |
+| begin the v1 → v2 migration | `soroban-migrate run --submit --limit 2` | [`0382876f…`](https://stellar.expert/explorer/testnet/tx/0382876fd8601f3e80198c82fbf093d4183c480b52da130ac630cc194f18595f) |
+| batch 1 of 3 | ″ | [`e96333c0…`](https://stellar.expert/explorer/testnet/tx/e96333c02aa9950dcd5a227ebb6451f82af0d94a25d2d3cf6661c12678f474a8) |
+| batch 2 of 3 | ″ | [`94cbb778…`](https://stellar.expert/explorer/testnet/tx/94cbb778903090f94eb7e76dc613a59aeaa015984370403491e83873f91e2fcc) |
+| batch 3 of 3, which advances the version | ″ | [`f4dfc639…`](https://stellar.expert/explorer/testnet/tx/f4dfc639abdbc0d0e06d4d864dca4f5bfb5c05424ecab18efb99e92a9a17fcbc) |
+| confirm, discarding the bookkeeping | `stellar contract invoke -- confirm_migration` | [`245d3db8…`](https://stellar.expert/explorer/testnet/tx/245d3db82a0024c5895e18c621524afff9c5947de7730f028b8dfcb24c4bf066) |
+
+What the CLI printed:
+
+```console
+$ soroban-migrate status
+CBYQ3PIO75UF4ZHZC6AZ4EU33WZYO7FNVTHESWUH4ZSK327YW72VOBRW @ testnet
+==================================================================
+  schema version:   v1
+  migration:        none in flight or recorded
+
+$ soroban-migrate run --submit --limit 2
+began migration v1 -> v2, 0 of 6 keys to visit
+  v1 -> v2  2/6 (33.3%)  visited 2: 0 migrated, 1 already current, 1 skipped
+  v1 -> v2  4/6 (66.7%)  visited 2: 0 migrated, 1 already current, 1 skipped
+  v1 -> v2  6/6 (100.0%)  visited 2: 0 migrated, 1 already current, 1 skipped
+
+migration complete: v1 -> v2. The contract now reports v2. Run `soroban-migrate status` to confirm, and confirm the migration on chain to discard its bookkeeping.
+
+$ soroban-migrate status
+CBYQ3PIO75UF4ZHZC6AZ4EU33WZYO7FNVTHESWUH4ZSK327YW72VOBRW @ testnet
+==================================================================
+  schema version:   v2
+  migration:        v1 -> v2, finished
+  progress:         6/6 (100.00%)
+```
+
+Afterwards `schema_version` returns `2` and all three balances read back unchanged
+(100, 200 and 300).
+
+### What this run does and does not show
+
+It shows `status` and `run --submit` working end to end against a real RPC: the
+argument vectors, the parsing of real `stellar` output, auth, fees, the
+begin/batch/resume loop across separate transactions, and the version advancing in
+the final batch.
+
+It does **not** show an old-shaped entry being rewritten. "0 migrated" is accurate:
+this build's `deposit` already writes the version-2 shape, so every balance was
+already current. Seeding genuinely version-1 entries needs a separate version-1 build
+of the contract, which the example does not have yet. The unit tests cover the
+rewrite by writing version-1 entries into storage directly.
+
+## Bug 1: the first live batch trapped
+
+Contract [`CALTLCI3ZAKTDOG43XXRUSGXDZ2EWR3EF2RGB56Q5PSW5T4UNYWV6MN4`](https://stellar.expert/explorer/testnet/contract/CALTLCI3ZAKTDOG43XXRUSGXDZ2EWR3EF2RGB56Q5PSW5T4UNYWV6MN4),
+built from the source before the fix. The same steps, and then:
+
+```console
+$ soroban-migrate run --submit --limit 2
+began migration v1 -> v2, 0 of 6 keys to visit
+error: `stellar contract invoke ... -- migrate_batch --limit 2` failed:
+❌ error: transaction simulation failed: HostError: Error(WasmVm, InvalidAction)
+   ... data:["VM call trapped: UnreachableCodeReached", migrate_batch]
+```
+
+**Cause.** The key index holds every key the contract registered, and `deposit`
+registers the `Stats` entry as well as the balance. The migration generated by
+`#[derive(Migration)]` decoded every indexed value with
+`storage.get::<Val, BalanceV2>`, and `get` *panics* when the stored value is a different
+shape. The first `Stats` key aborted the batch.
+
+**Why the tests missed it.** Every migration test seeded balances by writing them into
+storage directly, so the index never held anything but balances.
+
+**Fix.** The value is read raw and decoded with `try_from_val`; a value of another shape
+returns `EntryOutcome::Skipped`. Applied in `#[derive(Migration)]`, in the code that
+`soroban-migrate generate` writes, and in the example's hand-written migration. The
+regression tests are `entries_of_another_shape_in_the_index_are_skipped_not_fatal`
+(`examples/vault/tests/upgrade.rs`) and
+`a_value_of_another_shape_is_skipped_rather_than_decoded_with_get`
+(`crates/soroban-migrate-schema/tests/parse_and_generate.rs`).
+
+**What the failure also showed.** The framework's atomicity held on a real network.
+The failed batch never landed, and the contract still reports
+`{"status":"Running","cursor":0,"total":6}`, which is exactly where `begin` left it.
+Nothing was half-applied.
+
+## Bug 2: `dry-run` panicked on a fresh snapshot
+
+```console
+$ stellar snapshot create --address CAVWQUVQ5P5DRAFM6SXHUJTXXAZUAER4OUCEHVVMQDUBFXLQUJAYPA52 \
+    --network testnet --output json --out .soroban-migrate/snapshot.json
+$ soroban-migrate dry-run
+thread 'main' panicked at soroban-sdk-28.0.0-rc.1/src/ledger.rs:117:40:
+  ... "ledger protocol version too new for host", 30
+```
+
+**Cause.** Testnet is at protocol 30, and the host bundled with `soroban-sdk` 28 can only
+load protocol-28 ledgers.
+
+**Fix, for now.** `dry-run` reads the snapshot's protocol first and refuses with a
+sentence naming both versions, rather than panicking inside the SDK. A dry run against
+today's Testnet still needs this tool built against the protocol-30 SDK; that is #20.
+
+## Reproducing it
+
+```console
+$ stellar keys generate admin --network testnet --fund
+$ stellar contract build --package vault-example
+$ stellar contract deploy --wasm target/wasm32v1-none/release/vault_example.wasm \
+    --source admin --network testnet --alias vault
+$ stellar contract invoke --id vault --source admin --network testnet -- \
+    initialize --admin "$(stellar keys address admin)"
+$ stellar keys generate alice --network testnet --fund
+$ stellar contract invoke --id vault --source alice --network testnet -- \
+    deposit --owner "$(stellar keys address alice)" --amount 100
+```
+
+Then add a `[network]` section to `examples/vault/soroban-migrate.toml`:
+
+```toml
+[network]
+name = "testnet"
+contract = "C..."     # the id printed by `deploy`
+source = "admin"
+```
+
+and from `examples/vault/`:
+
+```console
+$ cargo run -q -p soroban-migrate-cli -- status
+$ cargo run -q -p soroban-migrate-cli -- run --submit
+$ stellar contract invoke --id vault --source admin --network testnet -- confirm_migration
+```

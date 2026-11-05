@@ -55,6 +55,7 @@ What the framework is responsible for, and what it is not.
 
 ## Known limitations
 
-`run`, `status` and `dry-run` are tested up to the network boundary but have not yet been
-run against a live RPC endpoint. Treat your first real run as the first real run: try it
-on Testnet before Mainnet.
+`status` and `run` have driven a full migration on Testnet (see
+[docs/TESTNET.md](docs/TESTNET.md)), but nothing has been run on Mainnet. `dry-run`
+cannot yet replay protocol-30 ledgers. Rehearse every migration on Testnet, against a
+copy of your contract holding representative data, before running it on Mainnet.

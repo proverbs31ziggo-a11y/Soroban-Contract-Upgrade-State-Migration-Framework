@@ -8,9 +8,11 @@
 Versioned storage-schema migrations for Soroban contracts.
 
 > **Status: 0.1, pre-release.** The compatibility checker, code generator and on-chain
-> runtime are complete and tested (248 tests in CI). Running against a live network is
-> the next milestone — see the [roadmap](docs/ROADMAP.md). Contributions are welcome:
-> start with [CONTRIBUTING.md](CONTRIBUTING.md).
+> runtime are complete and tested (293 tests in CI), and a migration has been driven
+> end to end on Stellar Testnet with the CLI — see [docs/TESTNET.md](docs/TESTNET.md)
+> for the contract, every transaction, and the two bugs that run found. Next steps are
+> on the [roadmap](docs/ROADMAP.md). Contributions are welcome: start with
+> [CONTRIBUTING.md](CONTRIBUTING.md).
 
 A Soroban contract can replace its Wasm. **Nothing migrates the state underneath.**
 Change a struct's shape and every existing persistent entry becomes unreadable — and
@@ -187,11 +189,14 @@ Two invariants belong to the application, and both fail silently:
   and a `[network]` section.** They delegate transaction construction, signing and
   submission to it. This tool never handles a secret key, and it does not reimplement
   fee estimation or auth assembly.
-* **`run`, `status` and `dry-run` have never been executed against a live endpoint.**
-  What is tested is everything up to the wire: the `stellar` argument vectors, the
-  parsing of its output, and the batch/resume loop replayed against a caller that
-  returns scripted results. Nothing here has sent a transaction to Testnet or Mainnet,
-  so treat the first real run as the first real run.
+* **`status` and `run` have been run on Testnet; Mainnet has not been touched.** The
+  [Testnet run](docs/TESTNET.md) drove a full v1 → v2 migration in three batches, with
+  every transaction linked. It did not rewrite a genuinely old-shaped entry — that
+  needs a version-1 build of the example — so the rewrite itself is covered by the
+  unit tests only.
+* **`dry-run` cannot replay today's Testnet.** The host bundled with `soroban-sdk` 28
+  loads only protocol-28 ledgers, and Testnet is at protocol 30. `dry-run` says so
+  rather than crashing; replaying current networks needs the SDK upgrade in #20.
 * **`dry-run` proves the batches fit; it does not prove the migration is correct.** It
   runs the contract's own code against the contract's own state in a forked host, so a
   migration that computes the wrong value computes it identically there. Correctness
@@ -229,7 +234,7 @@ docs/cap-85-86.md               which protocol primitive each mechanism uses
 ## Verifying it
 
 ```console
-$ cargo test --workspace                    # 248 tests
+$ cargo test --workspace                    # 293 tests
 $ cargo clippy --workspace --all-targets -- -D warnings
 $ cargo fmt --all --check
 $ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items

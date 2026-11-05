@@ -20,11 +20,12 @@ for how to pick one up.
 
 The framework is tested up to the network boundary. This milestone takes it across.
 
-* Run `status`, `run` and `dry-run` against Testnet, and record the contract IDs and
-  transaction hashes in the README — #15
+* ~~Run `status` and `run` against Testnet, and record the contract IDs and
+  transaction hashes~~ — done, see [TESTNET.md](TESTNET.md) (#15)
+* Run `dry-run` against Testnet — blocked on the protocol-30 SDK (#20)
 * Test the claim that the framework runs on protocol 27 and only decoding needs 28 — #14
 * Measure the key index's write amplification instead of asserting it — #13
-* Settle the policy for the `soroban-sdk` release-candidate pin — #20
+* Move to the protocol-30 `soroban-sdk`, and settle the pinning policy — #20
 
 ## Milestone 2 — easy to adopt
 

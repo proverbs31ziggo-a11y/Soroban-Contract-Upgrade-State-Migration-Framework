@@ -23,8 +23,26 @@ changes; each one is listed rather than left to be discovered.
 
 ## [Unreleased]
 
+### Fixed
+
+* **A migration no longer aborts on an indexed entry of another shape.** The key index
+  holds every key a contract registered, but `#[derive(Migration)]` and the code
+  `soroban-migrate generate` writes decoded every value with `storage.get::<_, T>`,
+  which panics on a value that is not a `T`. Found on Testnet, where the example's
+  `Stats` entry trapped the first batch. Values are now read raw, decoded with
+  `try_from_val`, and skipped when they are another shape. See `docs/TESTNET.md`.
+* **`dry-run` refuses a snapshot from a protocol its host cannot load**, naming both
+  versions, instead of panicking inside the SDK.
+
+### Changed
+
+* **`generate` output changed** for every plan that rewrites entries: the decode step is
+  now `storage.get::<Val, Val>` followed by `try_from_val`. Regenerate and commit
+  migrations produced by earlier versions; they carry the bug above.
+
 ### Added
 
+* `docs/TESTNET.md`: the first live run, with the contract ids and every transaction.
 * `CONTRIBUTING.md`, `SECURITY.md` (with a threat model), `CODE_OF_CONDUCT.md`, issue
   and pull-request templates, and `docs/ROADMAP.md`.
 * `LICENSE` containing the Apache License 2.0, which all four crate manifests already
