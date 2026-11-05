@@ -17,11 +17,22 @@
 //! the stored version otherwise. There is no way to call it and get the index out
 //! of step with the data.
 //!
-//! ```ignore
-//! use soroban_migrate::store;
-//!
-//! // Instead of `env.storage().persistent().set(&key, &value)`:
-//! store::put::<DataKey, _>(&env, &DataKey::Balance(owner).into_val(&env), &value);
+//! ```no_run
+//! # use soroban_migrate::key::MigrationKey;
+//! # use soroban_migrate_macros::Keyspace;
+//! # use soroban_sdk::{contracttype, Env};
+//! #
+//! # #[contracttype]
+//! # #[derive(Clone, Keyspace)]
+//! # pub enum DataKey {
+//! #     #[migration]
+//! #     Migration(MigrationKey),
+//! # }
+//! #
+//! # let env = Env::default();
+//! # let val = ();
+//! #
+//! store::put(&env, &DataKey::Migration(MigrationKey), &val);
 //! ```
 //!
 //! # The escape hatch
