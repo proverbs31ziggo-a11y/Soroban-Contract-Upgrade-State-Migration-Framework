@@ -1,0 +1,20 @@
+name: Feature request
+description: Something the framework should support.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do with your contract, and where does the framework get in the way?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you propose
+      description: If it changes what `check` allows, say why the change is safe for entries already on chain.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered

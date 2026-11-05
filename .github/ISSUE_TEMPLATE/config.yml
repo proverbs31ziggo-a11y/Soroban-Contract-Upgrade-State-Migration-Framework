@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/proverbs31ziggo-a11y/Soroban-Contract-Upgrade-State-Migration-Framework/security/advisories/new
+    about: Please report security problems privately, not as a public issue.
+  - name: Stellar developer Discord
+    url: https://discord.gg/stellardev
+    about: General Soroban questions that are not about this project.

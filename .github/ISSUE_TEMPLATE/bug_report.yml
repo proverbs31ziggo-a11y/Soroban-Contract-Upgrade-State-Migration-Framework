@@ -1,0 +1,46 @@
+name: Bug report
+description: Something behaves differently from what the docs say.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security problem?** Please do not file it here — use the
+        [private reporting form](https://github.com/proverbs31ziggo-a11y/Soroban-Contract-Upgrade-State-Migration-Framework/security/advisories/new) instead (see SECURITY.md).
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, and what you saw. Paste output in full.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: The smallest schema, config, or test that shows the problem.
+      render: rust
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part
+      options:
+        - CLI (soroban-migrate-cli)
+        - check / diff (soroban-migrate-schema)
+        - on-chain runtime (soroban-migrate)
+        - derive macros (soroban-migrate-macros)
+        - docs or example
+        - not sure
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: "Output of `soroban-migrate --version`, `stellar --version`, `rustc --version`"
