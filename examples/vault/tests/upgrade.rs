@@ -417,3 +417,25 @@ fn the_cli_generator_produces_valid_rust_for_the_examples_own_change() {
     assert!(generated.contains("if entry.frozen.is_none()"));
     assert!(generated.contains("entry.frozen = Some(false);"));
 }
+
+/// Found on Testnet, not in the test suite: every other test seeds balances directly,
+/// so the index never held anything but balances. A contract that took deposits
+/// through its own entry points also indexes the `Stats` entry, and a migration that
+/// decoded every indexed key as a balance trapped on it.
+#[test]
+fn entries_of_another_shape_in_the_index_are_skipped_not_fatal() {
+    let f = fixture();
+    let owners = [Address::generate(&f.env), Address::generate(&f.env)];
+    for owner in &owners {
+        f.client().deposit(owner, &100);
+    }
+
+    f.client().begin_migration();
+    f.client().migrate_batch(&10);
+
+    assert_eq!(f.client().schema_version(), Some(2));
+    for owner in &owners {
+        assert_eq!(f.balance(owner).unwrap().amount, 100);
+    }
+    assert_eq!(f.client().stats().unwrap().total, 200);
+}

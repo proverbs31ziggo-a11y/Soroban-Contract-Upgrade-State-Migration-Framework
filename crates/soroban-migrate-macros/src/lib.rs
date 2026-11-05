@@ -393,14 +393,27 @@ fn expand_migration(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
                         soroban_migrate::migration::EntryOutcome::Skipped,
                     );
                 }
-                let mut entry: #entry = match storage.get::<soroban_sdk::Val, #entry>(key) {
-                    ::core::option::Option::Some(e) => e,
+                // Decoded in two steps because the index holds every key the contract
+                // registered, not only this shape's. `get::<_, #entry>` panics when the
+                // stored value is another shape, which aborts the whole batch; a value
+                // that is not this shape is not this migration's to touch.
+                let raw: soroban_sdk::Val = match storage.get::<soroban_sdk::Val, soroban_sdk::Val>(key) {
+                    ::core::option::Option::Some(v) => v,
                     ::core::option::Option::None => {
                         return ::core::result::Result::Ok(
                             soroban_migrate::migration::EntryOutcome::Skipped,
                         )
                     }
                 };
+                let mut entry: #entry =
+                    match <#entry as soroban_sdk::TryFromVal<soroban_sdk::Env, soroban_sdk::Val>>::try_from_val(env, &raw) {
+                        ::core::result::Result::Ok(e) => e,
+                        ::core::result::Result::Err(_) => {
+                            return ::core::result::Result::Ok(
+                                soroban_migrate::migration::EntryOutcome::Skipped,
+                            )
+                        }
+                    };
                 let mut changed = false;
                 #(#down_body)*
                 if !changed {
@@ -456,14 +469,27 @@ fn expand_migration(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
                         soroban_migrate::migration::EntryOutcome::Skipped,
                     );
                 }
-                let mut entry: #entry = match storage.get::<soroban_sdk::Val, #entry>(key) {
-                    ::core::option::Option::Some(e) => e,
+                // Decoded in two steps because the index holds every key the contract
+                // registered, not only this shape's. `get::<_, #entry>` panics when the
+                // stored value is another shape, which aborts the whole batch; a value
+                // that is not this shape is not this migration's to touch.
+                let raw: soroban_sdk::Val = match storage.get::<soroban_sdk::Val, soroban_sdk::Val>(key) {
+                    ::core::option::Option::Some(v) => v,
                     ::core::option::Option::None => {
                         return ::core::result::Result::Ok(
                             soroban_migrate::migration::EntryOutcome::Skipped,
                         )
                     }
                 };
+                let mut entry: #entry =
+                    match <#entry as soroban_sdk::TryFromVal<soroban_sdk::Env, soroban_sdk::Val>>::try_from_val(env, &raw) {
+                        ::core::result::Result::Ok(e) => e,
+                        ::core::result::Result::Err(_) => {
+                            return ::core::result::Result::Ok(
+                                soroban_migrate::migration::EntryOutcome::Skipped,
+                            )
+                        }
+                    };
                 let mut changed = false;
                 #(#up_body)*
                 if !changed {

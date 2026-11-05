@@ -10,7 +10,7 @@
 use soroban_migrate::migration::{EntryOutcome, Migration};
 use soroban_migrate::MigrationError;
 use soroban_migrate_macros::Migration;
-use soroban_sdk::{Env, Val};
+use soroban_sdk::{Env, TryFromVal, Val};
 
 use crate::keys::DataKey;
 use crate::schema::BalanceV2;
@@ -68,9 +68,17 @@ impl AddFreezeFlagByHand {
         // Decoding with the *new* type is what makes this work: a key the new shape
         // declares but the entry lacks arrives as `None` because the field is an
         // `Option`, and keys the new shape does not declare are discarded.
-        let mut entry: BalanceV2 = match storage.get::<Val, BalanceV2>(key) {
-            Some(e) => e,
+        //
+        // The value is read raw and decoded separately because the index also holds
+        // the `Stats` entry, and `get::<_, BalanceV2>` panics on a value of another
+        // shape instead of returning `None`.
+        let raw: Val = match storage.get::<Val, Val>(key) {
+            Some(v) => v,
             None => return Ok(EntryOutcome::Skipped),
+        };
+        let mut entry = match BalanceV2::try_from_val(env, &raw) {
+            Ok(e) => e,
+            Err(_) => return Ok(EntryOutcome::Skipped),
         };
         let mut changed = false;
         // Optional addition: fill only when empty, so a second visit is a no-op.
