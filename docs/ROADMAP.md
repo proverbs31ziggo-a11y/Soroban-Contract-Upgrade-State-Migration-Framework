@@ -23,6 +23,9 @@ The framework is tested up to the network boundary. This milestone takes it acro
 * ~~Run `status` and `run` against Testnet, and record the contract IDs and
   transaction hashes~~ — done, see [TESTNET.md](TESTNET.md) (#15)
 * Run `dry-run` against Testnet — blocked on the protocol-30 SDK (#20)
+* A version-1 build of the example, so a live run rewrites old-shaped entries — #34
+* Compile generated migrations in CI, not only compare their text — #35
+* `status` on a finished migration stops suggesting another batch — #33
 * Test the claim that the framework runs on protocol 27 and only decoding needs 28 — #14
 * Measure the key index's write amplification instead of asserting it — #13
 * Move to the protocol-30 `soroban-sdk`, and settle the pinning policy — #20
