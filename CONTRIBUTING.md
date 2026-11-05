@@ -28,7 +28,7 @@ wait for a maintainer to agree before writing code.
 
 ## Setting up
 
-You need Rust **1.91.0** or later.
+You need Rust **1.91.0** or later, with `rustfmt` and `clippy`.
 
 ```console
 $ git clone https://github.com/proverbs31ziggo-a11y/Soroban-Contract-Upgrade-State-Migration-Framework
@@ -36,15 +36,38 @@ $ cd Soroban-Contract-Upgrade-State-Migration-Framework
 $ cargo test --workspace
 ```
 
-That is all you need for every crate except the contract build. To build the example
-contract to Wasm you also need [`stellar-cli`](https://developers.stellar.org/docs/tools/cli/stellar-cli)
->= 25.2.0, the `wasm32v1-none` target, and a compiler **other than 1.91.0** (see
-"Verifying it" in the [README](README.md#verifying-it) for why):
+That is all you need for every crate except the contract build. The test suite needs
+**no network, no `stellar` CLI, and no Wasm target**: every test runs against the
+in-process host from `soroban-sdk`'s `testutils`, and the CLI's RPC and `stellar` calls
+are tested by checking the command lines they build, not by running them. The slowest
+part is `crates/soroban-migrate/tests/resource_limits.rs`, which deliberately pushes a
+ledger past its budget. Running against a live network is a manual step, recorded in
+[`docs/TESTNET.md`](docs/TESTNET.md); it is not part of `cargo test` and not part of CI.
+
+### Two toolchains, on purpose
+
+CI uses two compilers, and this looks like an inconsistency. It is not.
+
+| what | compiler | why |
+| --- | --- | --- |
+| fmt, clippy, tests, docs, adoption gate | **1.91.0** exactly | the workspace `rust-version`; CI pins it so the MSRV claim is actually tested |
+| building the deployable contract | **1.98.1** (any accepted stable) | `stellar contract build` refuses 1.91.0, and 1.82–1.83, because they miscompile Wasm |
+
+So do not "fix" the `contract` job to use `rust-version`, and do not raise
+`rust-version` to match the contract job. To reproduce the `check` job exactly, run the
+commands below with `cargo +1.91.0`. To build the example contract to Wasm you also need
+[`stellar-cli`](https://developers.stellar.org/docs/tools/cli/stellar-cli) >= 25.2.0
+(CI pins 28.0.0) and the `wasm32v1-none` target:
 
 ```console
 $ rustup target add wasm32v1-none
 $ stellar contract build --package vault-example
 ```
+
+Plain `cargo build --target wasm32v1-none` is not a substitute: it skips the contract
+spec step, so the result compiles but is not deployable. The
+[README](README.md#verifying-it) and the comment above `[profile.contract]` in
+`Cargo.toml` give the details.
 
 ## Before you open a PR
 
@@ -57,6 +80,13 @@ $ cargo test --workspace
 $ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
 ```
 
+**Clippy pedantic lints are errors.** `soroban-migrate`, `soroban-migrate-schema`, and
+`soroban-migrate-cli` each set `#![warn(clippy::pedantic)]` at the crate root, and
+`-D warnings` turns every warning into a failure. Expect lints such as `doc_markdown`,
+`cast_possible_truncation`, and `needless_pass_by_value` on code that looks fine. Fix
+the code where you can. If a lint is wrong for one item, put `#[allow(clippy::...)]` on
+that item with a comment saying why. Do not add crate-wide allows to get a PR through.
+
 If you changed anything under `examples/vault/src/`, also run the adoption gate from
 `examples/vault/`:
 
@@ -64,6 +94,42 @@ If you changed anything under `examples/vault/src/`, also run the adoption gate 
 $ cargo run -q -p soroban-migrate-cli -- check
 $ cargo run -q -p soroban-migrate-cli -- generate 1 2 --force && git diff --exit-code -- migrations/
 ```
+
+## Where code runs: `no_std` and Wasm
+
+Two kinds of crate live in this workspace, and the difference matters more than anything
+else here.
+
+| crate | runs where | `std`? |
+| --- | --- | --- |
+| `soroban-migrate` (runtime) | inside the deployed contract, as Wasm | **no** — `#![no_std]` |
+| `examples/vault` | inside the deployed contract, as Wasm | **no** — `#![no_std]` |
+| code emitted by `soroban-migrate-schema`'s `codegen.rs` | inside the user's contract | **no** |
+| `soroban-migrate-schema`, `soroban-migrate-macros` | on the developer's machine, at build time | yes |
+| `soroban-migrate-cli` | on the developer's machine | yes |
+
+The two most likely first contributions both cross this line:
+
+* **A new schema change kind.** The classification (`ChangeKind` and the `check`
+  verdict in `crates/soroban-migrate-schema/src/diff.rs`) is host code, and `std` is
+  fine there. But if the change kind needs a new generated migration, the code
+  `codegen.rs` emits compiles into a `no_std` contract. It may use only `soroban_sdk`
+  and `soroban_migrate`: no `String`, `Vec`, `format!`, or `std::` paths. Use
+  `soroban_sdk::{String, Vec, Map, Bytes}` instead. If it needs runtime support, that
+  goes in `soroban-migrate`, with the same restriction.
+* **A new CLI subcommand.** It goes in `crates/soroban-migrate-cli/src/commands/`, where
+  `std` is fine. But the CLI reuses the runtime crate's types and constants on purpose
+  (see the comment in its `Cargo.toml`). If you need a new shared type, add it to
+  `soroban-migrate` in `no_std` form. Do not copy it into the CLI, and do not give the
+  runtime a `std` feature.
+
+`cargo test` will not catch a `std` leak into generated code, because tests compile it
+for the host. Build the example with `stellar contract build --package vault-example`
+before opening a PR that changes `codegen.rs` or `soroban-migrate`. The `contract` CI
+job will also catch it.
+
+For the protocol background (why fleets, executable references, and the batch limits
+exist), read [`docs/cap-85-86.md`](docs/cap-85-86.md).
 
 ## What a good PR looks like
 
@@ -90,6 +156,7 @@ however good the rest is.
 3. **No secret keys.** The CLI delegates signing to `stellar`. It must never read,
    store, or log a secret.
 4. **The runtime crate stays `no_std`** and adds no dependencies without discussion.
+   Neither does generated migration code (see "Where code runs" above).
 
 ## Commit messages
 
@@ -98,11 +165,30 @@ characters. In the body, say what was wrong and why the change fixes it.
 
 ## Releasing (maintainers)
 
-1. Move the `[Unreleased]` changelog entries under a new version heading.
-2. Bump `version` in the workspace `Cargo.toml` and the `workspace.dependencies` paths.
-3. Tag `vX.Y.Z` on `main` and publish the crates in dependency order:
-   `soroban-migrate-schema`, `soroban-migrate-macros`, `soroban-migrate`,
-   `soroban-migrate-cli`.
+Four crates are published. `vault-example` has `publish = false` and is never
+released.
+
+1. Make sure `main` is green on all three CI jobs (`check`, `example`, `contract`).
+2. Move the `[Unreleased]` changelog entries under a new version heading. Decide the
+   version bump using the note at the top of the changelog: a stricter `check` or
+   different `generate` output counts as breaking.
+3. Bump `version` under `[workspace.package]`, and the matching `version` of each
+   internal crate under `[workspace.dependencies]`. They must agree, or `cargo publish`
+   resolves the wrong version.
+4. Commit, then tag `vX.Y.Z` on `main`.
+5. Publish in this order, waiting for each crate to appear on crates.io before the
+   next:
+
+   ```console
+   $ cargo publish -p soroban-migrate-schema
+   $ cargo publish -p soroban-migrate
+   $ cargo publish -p soroban-migrate-macros
+   $ cargo publish -p soroban-migrate-cli
+   ```
+
+   `soroban-migrate` comes before `soroban-migrate-macros` because the macros crate
+   has a versioned dev-dependency on it, and `cargo publish` must resolve that from
+   crates.io. Run `cargo publish --dry-run -p <crate>` first if you are unsure.
 
 ## Conduct
 
