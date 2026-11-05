@@ -186,6 +186,9 @@ mod storage_schema {
         let mut schema =
             soroban_migrate_schema::model::Schema::new(version, name.clone(), model_fields);
         schema.note = attrs.note.or_else(|| doc_note(&input.attrs));
+        // No `nested`: a derive sees only its own struct, not the structs its fields
+        // name. The committed snapshot, built from the whole source by
+        // `parse::parse_sources`, is what records embedded shapes and what `check` reads.
         let json = schema.to_json();
 
         let version_lit = LitInt::new(&version.to_string(), proc_macro2::Span::call_site());

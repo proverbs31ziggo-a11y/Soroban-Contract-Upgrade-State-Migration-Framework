@@ -159,7 +159,8 @@ fn draft(from: u32, to: u32, diff: &Diff) -> MigrationPlan {
             | ChangeKind::Renamed { .. }
             | ChangeKind::BecameOptional
             | ChangeKind::SpellingChanged
-            | ChangeKind::Reordered => {}
+            | ChangeKind::Reordered
+            | ChangeKind::NestedChanged { .. } => {}
         }
     }
     plan

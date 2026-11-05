@@ -92,6 +92,18 @@ pub enum ChangeKind {
     /// symbol-keyed maps, so the order fields are declared in is not part of the
     /// shape.
     Reordered,
+    /// The field's declared type is unchanged, but a shape it embeds changed — a
+    /// `meta: Metadata` field where `Metadata` gained, lost, or retyped a field.
+    ///
+    /// The field's value is a map inside the entry's map, so the entry's encoding
+    /// moved even though its own fields did not. No plan directive covers this: the
+    /// old `Metadata` was edited in place, so no Rust type is left that can decode the
+    /// old values. A breaking change has to be made as a retype instead — keep the old
+    /// struct under its own name and point the field at a new one.
+    NestedChanged {
+        /// One line per change, e.g. `Metadata.flag: added, required`.
+        changes: Vec<String>,
+    },
 }
 
 impl ChangeKind {
@@ -107,6 +119,9 @@ impl ChangeKind {
             ChangeKind::BecameRequired => "became required".into(),
             ChangeKind::SpellingChanged => "type spelling changed".into(),
             ChangeKind::Reordered => "order changed".into(),
+            ChangeKind::NestedChanged { changes } => {
+                format!("embedded shape changed ({})", changes.join("; "))
+            }
         }
     }
 
@@ -119,9 +134,10 @@ impl ChangeKind {
             ChangeKind::Removed => Some("dropped"),
             ChangeKind::Retyped { .. } => Some("converted"),
             ChangeKind::Renamed { .. } => Some("renamed"),
-            ChangeKind::SpellingChanged | ChangeKind::Reordered | ChangeKind::BecameOptional => {
-                None
-            }
+            ChangeKind::SpellingChanged
+            | ChangeKind::Reordered
+            | ChangeKind::BecameOptional
+            | ChangeKind::NestedChanged { .. } => None,
         }
     }
 }
@@ -705,6 +721,8 @@ pub fn diff_with_plan(
         });
     }
 
+    findings.extend(nested_findings(from, to, plan));
+
     // Reordering, reported only when the sets of names are identical: a reorder
     // alongside real changes is noise, and noise is how a report stops being read.
     if from.field_names() != to.field_names() && same_field_set(from, to) {
@@ -734,6 +752,192 @@ pub fn diff_with_plan(
         verdict,
         plan_applied: !plan.is_empty(),
     })
+}
+
+/// What changed inside the shapes one field embeds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddedChange {
+    /// The field, in the newer schema, whose type reaches the changed shapes.
+    pub field: String,
+    /// One line per change, e.g. `Metadata.flag: added, required`.
+    pub changes: Vec<String>,
+    /// Whether any change makes an existing value trap on decode or lose data when
+    /// written back: the same changes that are denied for a schema's own fields.
+    pub breaking: bool,
+    /// Whether a shape the field names directly is recorded on only one side, so
+    /// whether it changed cannot be known.
+    pub unrecorded: bool,
+}
+
+/// Every field of `to` whose declared type is unchanged from `from` but which embeds
+/// a shape that changed between the two snapshots.
+///
+/// Fields are paired by name, and through the plan's renames. A field whose base type
+/// changed is not included: that is already a [`ChangeKind::Retyped`], and its
+/// embedded shapes are a different type's.
+pub fn embedded_changes(from: &Schema, to: &Schema, plan: &MigrationPlan) -> Vec<EmbeddedChange> {
+    let mut out = Vec::new();
+    for new in &to.fields {
+        let old = from
+            .field(&new.name)
+            .or_else(|| plan.renamed_from(&new.name).and_then(|o| from.field(o)));
+        let Some(old) = old else { continue };
+        if old.base != new.base {
+            continue;
+        }
+
+        let mut changes = Vec::new();
+        let mut breaking = false;
+        let mut unrecorded = false;
+
+        // A shape the field names directly but only one snapshot recorded. The common
+        // cause is a snapshot taken before nested shapes were recorded at all.
+        let direct = crate::model::referenced_names(&new.declared);
+        for name in &direct {
+            match (from.nested.contains_key(name), to.nested.contains_key(name)) {
+                (false, true) => {
+                    unrecorded = true;
+                    changes.push(format!(
+                        "{name}: not recorded in the v{} snapshot",
+                        from.version
+                    ));
+                }
+                (true, false) => {
+                    unrecorded = true;
+                    changes.push(format!(
+                        "{name}: not recorded in the v{} snapshot",
+                        to.version
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        // Shapes reached on both sides. One reached on only one side is explained by
+        // a change to the shape that embeds it, which is reported there.
+        let before = from.reached_from(&old.declared);
+        for name in to.reached_from(&new.declared) {
+            if !before.contains(&name) {
+                continue;
+            }
+            for (line, is_breaking) in shape_changes(name, &from.nested[name], &to.nested[name]) {
+                breaking |= is_breaking;
+                changes.push(line);
+            }
+        }
+
+        if !changes.is_empty() {
+            out.push(EmbeddedChange {
+                field: new.name.clone(),
+                changes,
+                breaking,
+                unrecorded,
+            });
+        }
+    }
+    out
+}
+
+/// Classifies the changes between two versions of one embedded shape, as
+/// `(line, breaking)`. Declaration order is ignored for the same reason it is at the
+/// top level: the encoding is a symbol-keyed map.
+fn shape_changes(
+    shape: &str,
+    old: &[crate::model::Field],
+    new: &[crate::model::Field],
+) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    for n in new {
+        match old.iter().find(|o| o.name == n.name) {
+            None if n.optional => out.push((format!("{shape}.{}: added, optional", n.name), false)),
+            None => out.push((format!("{shape}.{}: added, required", n.name), true)),
+            Some(o) if o.base != n.base => out.push((
+                format!(
+                    "{shape}.{}: retyped {} -> {}",
+                    n.name, o.declared, n.declared
+                ),
+                true,
+            )),
+            Some(o) if o.optional && !n.optional => {
+                out.push((format!("{shape}.{}: became required", n.name), true));
+            }
+            Some(o) if !o.optional && n.optional => {
+                out.push((format!("{shape}.{}: became optional", n.name), false));
+            }
+            // Same base and optionality, so only the `Option` path was spelled
+            // differently.
+            Some(_) => {}
+        }
+    }
+    for o in old {
+        if !new.iter().any(|n| n.name == o.name) {
+            out.push((format!("{shape}.{}: removed", o.name), true));
+        }
+    }
+    out
+}
+
+/// Findings for [`embedded_changes`].
+fn nested_findings(from: &Schema, to: &Schema, plan: &MigrationPlan) -> Vec<Finding> {
+    embedded_changes(from, to, plan)
+        .into_iter()
+        .map(|c| {
+            let shapes = shapes_named(&c.changes);
+            let (severity, detail) = if c.breaking {
+                (
+                    Severity::Denied,
+                    format!(
+                        "`{}` is still declared `{}`, but {shapes} changed in a way that makes an                          existing value trap on decode or lose data when written back. The value                          is a map inside every v{} entry, so every entry is affected. No plan can                          declare this: the old shape was edited in place, so nothing is left that                          decodes the old values. Keep the old struct under its own name, declare                          the new shape as a new struct, and change the field's type to it — the                          change is then a retype that `converted[\"{}\"]` covers.",
+                        c.field,
+                        to.field(&c.field).map_or("", |f| f.declared.as_str()),
+                        from.version,
+                        c.field
+                    ),
+                )
+            } else if c.unrecorded {
+                (
+                    Severity::Warning,
+                    format!(
+                        "`{}` embeds {shapes}, which only one of the two snapshots records, so                          whether it changed between v{} and v{} cannot be checked. Snapshots                          written before embedded shapes were tracked do not record them. Confirm                          by hand that the shape is the same, or that it changed only by adding                          optional fields.",
+                        c.field, from.version, to.version
+                    ),
+                )
+            } else {
+                (
+                    Severity::Warning,
+                    format!(
+                        "`{}` embeds {shapes}, which changed without breaking existing values:                          un-migrated entries still decode, with any new optional field as                          `None`. The entry's encoding did move, so the change is reported rather                          than ignored.",
+                        c.field
+                    ),
+                )
+            };
+            Finding {
+                field: c.field,
+                kind: ChangeKind::NestedChanged { changes: c.changes },
+                severity,
+                detail,
+            }
+        })
+        .collect()
+}
+
+/// `` `Metadata` `` or `` `Metadata` and `Inner` ``, from change lines.
+fn shapes_named(changes: &[String]) -> String {
+    let mut names: Vec<&str> = changes
+        .iter()
+        .filter_map(|c| c.split(['.', ':']).next())
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    let quoted: Vec<String> = names.iter().map(|n| format!("`{n}`")).collect();
+    match quoted.len() {
+        0 => "an embedded shape".into(),
+        1 => quoted[0].clone(),
+        _ => {
+            let (last, rest) = quoted.split_last().expect("len > 1");
+            format!("{} and {last}", rest.join(", "))
+        }
+    }
 }
 
 fn verdict_for(severity: Severity) -> Verdict {

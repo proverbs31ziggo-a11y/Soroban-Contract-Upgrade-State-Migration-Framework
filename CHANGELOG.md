@@ -36,6 +36,29 @@ changes; each one is listed rather than left to be discovered.
 
 ### Changed
 
+* **A change inside a shape a field embeds is now checked, where it was previously
+  invisible** (#7). With `meta: Metadata` on a schema, editing `Metadata` changed the
+  encoding of every stored entry while the schema's own snapshot stayed byte-identical, so
+  `check` reported `verdict: safe` about a change that makes every entry trap on decode.
+
+  Each snapshot now records the `#[contracttype]` structs its fields reach, transitively,
+  under a new `nested` key. `check` denies a snapshot whose embedded shapes no longer
+  match the source, naming the shape and field that changed, and the version diff reports
+  a `ChangeKind::NestedChanged` finding on the embedding field: denied when an embedded
+  field was added as required, removed, retyped, or made required, and a warning
+  otherwise. No plan directive clears the denial, because the old struct was edited in
+  place and nothing is left to decode old values with; the fix the report names is to
+  keep the old struct under its own name and retype the field.
+
+  This is a stricter verdict, so a change that used to pass can now fail. Two further
+  changes can fail a parse that used to succeed: a schema that reaches itself through its
+  fields is refused, since a by-value encoding has no layout for it, and so is a schema
+  that reaches a struct name declared twice with different fields.
+
+  Snapshots written by earlier releases have no `nested` key and still load. `check`
+  warns about each one — it cannot show whether the embedded shapes changed since — and
+  `schema export` fills them in instead of refusing them. Schemas that embed nothing
+  serialize exactly as before.
 * **`generate` output changed** for every plan that rewrites entries: the decode step is
   now `storage.get::<Val, Val>` followed by `try_from_val`. Regenerate and commit
   migrations produced by earlier versions; they carry the bug above.

@@ -155,7 +155,12 @@ pub fn generate(
                 // the new struct has no field for the key, so the decoder discards it.
                 carried.push(finding.field.clone());
             }
-            ChangeKind::BecameOptional | ChangeKind::SpellingChanged | ChangeKind::Reordered => {}
+            // Never denied by the time codegen runs, and never something generated code
+            // can act on: the change is absorbed by tolerant decoding of the embedded map.
+            ChangeKind::BecameOptional
+            | ChangeKind::SpellingChanged
+            | ChangeKind::Reordered
+            | ChangeKind::NestedChanged { .. } => {}
         }
     }
 
