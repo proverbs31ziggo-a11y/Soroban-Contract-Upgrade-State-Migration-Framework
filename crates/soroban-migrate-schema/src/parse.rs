@@ -23,10 +23,12 @@
 //! with `syn` in order to reject unknown arguments at compile time, and the CLI uses
 //! [`parse_source`] to build the JSON snapshot it diffs.
 
+use std::collections::BTreeMap;
+
 use syn::{Attribute, Fields, Item, Lit, Type};
 
 use crate::error::SchemaError;
-use crate::model::{Field, KeySpace, KeyVariant, Schema};
+use crate::model::{referenced_names, Field, KeySpace, KeyVariant, Schema};
 
 /// Parses every `#[storage_schema]` declaration in one Rust source file.
 ///
@@ -34,24 +36,184 @@ use crate::model::{Field, KeySpace, KeyVariant, Schema};
 /// keep schemas in their own module, and a directory walk will hand this function
 /// plenty of files that have nothing to do with migrations.
 ///
+/// Embedded shapes are resolved within this file only. A contract whose embedded
+/// structs live in another file should use [`parse_sources`], which sees all of them.
+///
 /// # Errors
 ///
 /// [`SchemaError::Parse`] for malformed Rust, and for a `#[storage_schema]`
 /// attribute that is missing `version`, has an unparseable argument, or is applied to
-/// something other than a struct with named fields.
+/// something other than a struct with named fields. Also for a schema that reaches
+/// itself through its fields; see [`parse_sources`].
 pub fn parse_source(file: &str, source: &str) -> Result<Vec<Schema>, SchemaError> {
-    let ast = syn::parse_file(source).map_err(|e| SchemaError::Parse {
-        file: file.to_string(),
-        message: e.to_string(),
-    })?;
+    parse_sources(&[(file, source)])
+}
 
-    let mut schemas = Vec::new();
-    for item in &ast.items {
-        if let Some(schema) = parse_item(file, item)? {
-            schemas.push(schema);
+/// Parses every `#[storage_schema]` declaration across a set of Rust source files,
+/// and records for each one the shapes its fields reach.
+///
+/// # Embedded shapes
+///
+/// A field whose type is another `#[contracttype]` struct — `meta: Metadata`, or
+/// `Vec<Metadata>` — is encoded as a map inside the entry's own map. Changing
+/// `Metadata` changes every entry that embeds it, even when the embedding struct is
+/// untouched. So each schema's [`Schema::nested`] records the transitive closure of
+/// struct shapes its fields reach, read from every file at once: an embedded struct
+/// usually lives in a different module from the schema that uses it.
+///
+/// A struct counts as a shape if it carries `#[contracttype]` or `#[storage_schema]`
+/// and has named fields. Shapes are matched to field types by identifier, which is
+/// the only name a field type can use for them.
+///
+/// # Errors
+///
+/// Everything [`parse_source`] reports, and two more, both naming the file:
+///
+/// * A schema that reaches **itself**, directly or through another shape. Soroban's
+///   map encoding has no references, so a recursive shape has no fixed layout to
+///   snapshot and cannot be migrated field by field.
+/// * A schema that reaches a struct name declared **more than once** with different
+///   fields. Which of the two the field means depends on imports this parser does not
+///   resolve, and guessing would check the wrong shape. Duplicates nothing reaches are
+///   ignored.
+pub fn parse_sources(files: &[(&str, &str)]) -> Result<Vec<Schema>, SchemaError> {
+    let mut schemas: Vec<(String, String, Schema)> = Vec::new();
+    let mut shapes = ShapeTable::default();
+
+    for (file, source) in files {
+        let ast = syn::parse_file(source).map_err(|e| SchemaError::Parse {
+            file: (*file).to_string(),
+            message: e.to_string(),
+        })?;
+        for item in &ast.items {
+            if let Some(schema) = parse_item(file, item)? {
+                let Item::Struct(s) = item else {
+                    unreachable!("parse_item only returns a schema for a struct")
+                };
+                schemas.push(((*file).to_string(), s.ident.to_string(), schema));
+            }
+            if let Item::Struct(s) = item {
+                shapes.record(file, s);
+            }
         }
     }
-    Ok(schemas)
+
+    schemas
+        .into_iter()
+        .map(|(file, ident, mut schema)| {
+            schema.nested = shapes.closure(&file, &ident, &schema)?;
+            Ok(schema)
+        })
+        .collect()
+}
+
+/// Every struct shape in the source, by identifier.
+#[derive(Default)]
+struct ShapeTable {
+    /// Each identifier's declarations, as `(file, fields)`. More than one only when the
+    /// same name is declared in several places.
+    by_ident: BTreeMap<String, Vec<(String, Vec<Field>)>>,
+}
+
+impl ShapeTable {
+    fn record(&mut self, file: &str, item: &syn::ItemStruct) {
+        let is_shape = carries_attr_named(&item.attrs, "contracttype")
+            || storage_schema_attr(&item.attrs).is_some();
+        let Fields::Named(named) = &item.fields else {
+            return;
+        };
+        if !is_shape {
+            return;
+        }
+        let fields = named
+            .named
+            .iter()
+            .filter_map(|f| {
+                f.ident
+                    .as_ref()
+                    .map(|i| Field::new(i.to_string(), render_type(&f.ty)))
+            })
+            .collect();
+        self.by_ident
+            .entry(item.ident.to_string())
+            .or_default()
+            .push((file.to_string(), fields));
+    }
+
+    /// The one declaration of `ident`, if it is a shape.
+    fn get(&self, file: &str, ident: &str) -> Result<Option<&Vec<Field>>, SchemaError> {
+        let Some(decls) = self.by_ident.get(ident) else {
+            return Ok(None);
+        };
+        let first = &decls[0].1;
+        if decls.iter().any(|(_, fields)| fields != first) {
+            return Err(SchemaError::Parse {
+                file: file.to_string(),
+                message: format!(
+                    "`{ident}` is embedded in a storage schema, but more than one struct of that                      name is declared, with different fields ({}). Which one the field means                      depends on imports, and checking the wrong one would hide a change to the                      other. Rename one of them.",
+                    decls
+                        .iter()
+                        .map(|(f, _)| format!("`{f}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            });
+        }
+        Ok(Some(first))
+    }
+
+    /// Every shape `schema` reaches through its fields, refusing a cycle.
+    fn closure(
+        &self,
+        file: &str,
+        root: &str,
+        schema: &Schema,
+    ) -> Result<BTreeMap<String, Vec<Field>>, SchemaError> {
+        let mut out = BTreeMap::new();
+        let mut path = vec![root.to_string()];
+        for field in &schema.fields {
+            self.walk(file, &field.declared, &mut path, &mut out)?;
+        }
+        Ok(out)
+    }
+
+    /// Depth-first over the shapes `declared` names. `path` is the chain of shapes
+    /// being expanded, so a name already on it is a cycle; `out` doubles as the
+    /// visited set, so a shape reached twice without a cycle is expanded once.
+    fn walk(
+        &self,
+        file: &str,
+        declared: &str,
+        path: &mut Vec<String>,
+        out: &mut BTreeMap<String, Vec<Field>>,
+    ) -> Result<(), SchemaError> {
+        for name in referenced_names(declared) {
+            if path.contains(&name) {
+                path.push(name);
+                return Err(SchemaError::Parse {
+                    file: file.to_string(),
+                    message: format!(
+                        "`{}` contains itself ({}). A `#[contracttype]` value is encoded by                          value, with no references, so a recursive shape has no fixed layout to                          snapshot or migrate. Store the inner values as separate entries under                          their own keys instead.",
+                        path[0],
+                        path.join(" -> ")
+                    ),
+                });
+            }
+            if out.contains_key(&name) {
+                continue;
+            }
+            let Some(fields) = self.get(file, &name)? else {
+                continue;
+            };
+            out.insert(name.clone(), fields.clone());
+            path.push(name);
+            for f in fields {
+                self.walk(file, &f.declared, path, out)?;
+            }
+            path.pop();
+        }
+        Ok(())
+    }
 }
 
 fn parse_item(file: &str, item: &Item) -> Result<Option<Schema>, SchemaError> {
@@ -163,6 +325,7 @@ fn parse_item(file: &str, item: &Item) -> Result<Option<Schema>, SchemaError> {
         name: name.unwrap_or_else(|| item.ident.to_string()),
         note: note.or_else(|| doc_comment(&item.attrs)),
         fields,
+        nested: BTreeMap::new(),
     }))
 }
 
@@ -307,6 +470,14 @@ fn payload_of(fields: &Fields) -> Option<String> {
 /// Whether an attribute list contains `#[name]`.
 fn carries_attr(attrs: &[Attribute], name: &str) -> bool {
     attrs.iter().any(|a| a.path().is_ident(name))
+}
+
+/// Whether an attribute list contains `#[name]` or `#[path::to::name]`, matched on the
+/// last path segment so `#[soroban_sdk::contracttype]` counts.
+fn carries_attr_named(attrs: &[Attribute], name: &str) -> bool {
+    attrs
+        .iter()
+        .any(|a| a.path().segments.last().is_some_and(|s| s.ident == name))
 }
 
 /// Whether a `#[derive(..)]` list names a particular trait.

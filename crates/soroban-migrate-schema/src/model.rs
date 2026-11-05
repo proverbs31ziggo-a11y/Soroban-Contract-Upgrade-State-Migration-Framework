@@ -37,6 +37,23 @@ pub struct Schema {
     /// are readable, but it carries no meaning: Soroban's `#[contracttype]` structs
     /// are serialized as symbol-keyed maps, so reordering fields is not a change.
     pub fields: Vec<Field>,
+    /// The shapes this schema's fields reach, by Rust type name, as they were when the
+    /// snapshot was taken.
+    ///
+    /// A field declared `meta: Metadata` encodes as a map *inside* this entry's map, so
+    /// a change to `Metadata` changes this entry's encoding even though none of this
+    /// schema's own fields did. Recording the reached shapes is what makes that change
+    /// visible: the struct `Metadata` will be edited in place, and once it is, the source
+    /// no longer says what entries written at this version contain. The snapshot does.
+    ///
+    /// The closure is transitive — a shape reached through another shape is here too —
+    /// so comparing two snapshots needs nothing but the two snapshots.
+    ///
+    /// Empty for a schema whose fields reach no tracked shape, and for a snapshot
+    /// written before nested shapes were recorded. The two are told apart where it
+    /// matters, by whether a field's type names a shape the other side recorded.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub nested: BTreeMap<String, Vec<Field>>,
 }
 
 /// One field of a schema.
@@ -90,7 +107,48 @@ impl Schema {
             name: name.into(),
             note: None,
             fields,
+            nested: BTreeMap::new(),
         }
+    }
+
+    /// The shape names in `nested` that a declared type reaches, directly or through
+    /// another recorded shape, in a deterministic order.
+    ///
+    /// Recorded shapes are matched by identifier, so `Vec<Metadata>`,
+    /// `Option<Metadata>`, `Map<Symbol, Metadata>`, and `crate::types::Metadata` all
+    /// reach `Metadata`.
+    pub fn reached_from(&self, declared: &str) -> Vec<&str> {
+        let mut seen: Vec<&str> = Vec::new();
+        let mut pending: Vec<String> = referenced_names(declared);
+        while let Some(name) = pending.pop() {
+            let Some((key, fields)) = self.nested.get_key_value(name.as_str()) else {
+                continue;
+            };
+            if seen.contains(&key.as_str()) {
+                continue;
+            }
+            seen.push(key.as_str());
+            for f in fields {
+                pending.extend(referenced_names(&f.declared));
+            }
+        }
+        seen.sort_unstable();
+        seen
+    }
+
+    /// Whether `self` is a snapshot of `current` written before nested shapes were
+    /// recorded: identical in everything except that it has no `nested` and `current`
+    /// does.
+    ///
+    /// Such a snapshot cannot be proven stale, and cannot be proven current either: it
+    /// does not say what the embedded shapes were when it was taken.
+    pub fn predates_nested_tracking(&self, current: &Schema) -> bool {
+        self.nested.is_empty()
+            && !current.nested.is_empty()
+            && self.version == current.version
+            && self.name == current.name
+            && self.note == current.note
+            && self.fields == current.fields
     }
 
     /// A lookup by field name.
@@ -152,6 +210,17 @@ impl Schema {
                 if f.optional { "optional" } else { "required" }
             ));
         }
+        for (shape, fields) in &self.nested {
+            out.push_str(&format!("  embeds {shape}\n"));
+            for f in fields {
+                out.push_str(&format!(
+                    "    {:<22} {:<32} {}\n",
+                    f.name,
+                    f.declared,
+                    if f.optional { "optional" } else { "required" }
+                ));
+            }
+        }
         out
     }
 }
@@ -172,6 +241,24 @@ pub fn split_option(declared: &str) -> (String, bool) {
         Some(inner) => (inner.trim().to_string(), true),
         None => (t.to_string(), false),
     }
+}
+
+/// Every identifier in a declared type, in order, e.g. `Map<Symbol, a::Metadata>` gives
+/// `Map`, `Symbol`, `a`, `Metadata`.
+///
+/// Over-inclusive on purpose: a path segment or a container name only matters if a
+/// shape of that name is tracked, and a type cannot name a tracked shape without
+/// spelling its identifier.
+pub fn referenced_names(declared: &str) -> Vec<String> {
+    declared
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .filter(|t| {
+            t.chars()
+                .next()
+                .is_some_and(|c| c.is_alphabetic() || c == '_')
+        })
+        .map(str::to_string)
+        .collect()
 }
 
 /// Normalizes a type for comparison: removes whitespace, and resolves the

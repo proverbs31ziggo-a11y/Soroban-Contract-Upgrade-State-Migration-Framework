@@ -190,14 +190,29 @@ fn collect_drift(project: &Project, committed: &SchemaSet, report: &mut Report) 
             let schema = declared.get(name, version).expect("from the set");
             match committed.get(name, version) {
                 Some(existing) if existing == schema => {}
-                Some(_) => report.drift.push(Drift {
+                Some(existing) if existing.predates_nested_tracking(schema) => {
+                    report.drift.push(Drift {
+                        shape: name.to_string(),
+                        version,
+                        severity: Severity::Warning,
+                        detail: format!(
+                            "the snapshot predates the recording of embedded shapes, so it \
+                             cannot show whether {} changed since it was taken. Confirm they \
+                             have not, then run `soroban-migrate schema export` to record them.",
+                            schema
+                                .nested
+                                .keys()
+                                .map(|k| format!("`{k}`"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    });
+                }
+                Some(existing) => report.drift.push(Drift {
                     shape: name.to_string(),
                     version,
                     severity: Severity::Denied,
-                    detail: "changed in the source without its version changing. Bump \
-                             `#[storage_schema(version = N)]` and the version the contract \
-                             records with it, or this snapshot stops describing the code."
-                        .into(),
+                    detail: drift_detail(existing, schema),
                 }),
                 None => report.drift.push(Drift {
                     shape: name.to_string(),
@@ -210,6 +225,43 @@ fn collect_drift(project: &Project, committed: &SchemaSet, report: &mut Report) 
             }
         }
     }
+}
+
+/// Why a committed snapshot no longer matches the source.
+///
+/// When the schema's own fields are unchanged, the difference is in a shape it embeds,
+/// and saying which one is the difference between a finding that is acted on and one
+/// that looks like a false positive: the struct the developer edited is not the one
+/// being reported.
+fn drift_detail(
+    committed: &soroban_migrate_schema::model::Schema,
+    source: &soroban_migrate_schema::model::Schema,
+) -> String {
+    let bump = "Bump `#[storage_schema(version = N)]` and the version the contract records \
+                with it, or this snapshot stops describing the code.";
+    if committed.fields != source.fields {
+        return format!("changed in the source without its version changing. {bump}");
+    }
+    let plan = soroban_migrate_schema::plan::MigrationPlan::new(committed.version, source.version);
+    let changes: Vec<String> =
+        soroban_migrate_schema::diff::embedded_changes(committed, source, &plan)
+            .into_iter()
+            .flat_map(|c| {
+                c.changes
+                    .into_iter()
+                    .map(move |l| format!("`{}` via {l}", c.field))
+            })
+            .collect();
+    if changes.is_empty() {
+        return format!("changed in the source without its version changing. {bump}");
+    }
+    format!(
+        "its own fields are unchanged, but a shape it embeds changed, and every stored entry \
+         carries that shape inside it: {}. {bump} If the change is not just an added optional \
+         field, keep the old struct under its own name and give the new shape a new one, so \
+         old entries still have a type that decodes them.",
+        changes.join("; ")
+    )
 }
 
 /// Records a finding for every way the source's key space differs from the committed
@@ -1034,6 +1086,92 @@ mod tests {
             denied.iter().all(|d| d.shape.contains("DataKey")),
             "the report must say which enum it is about: {details:?}"
         );
+    }
+
+    fn write_metadata(dir: &std::path::Path, fields: &str) {
+        std::fs::write(
+            dir.join("src/meta.rs"),
+            format!("#[contracttype]\npub struct Metadata {{\n{fields}\n}}\n"),
+        )
+        .unwrap();
+    }
+
+    fn project_embedding_metadata() -> (tempfile::TempDir, Project) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        write_metadata(dir.path(), "    pub memo: Symbol,");
+        let mut config = crate::config::scaffold("balance", true);
+        config.schema = Some("Balance".into());
+        config.save(dir.path()).unwrap();
+        write_source(
+            dir.path(),
+            "    pub amount: i128,\n    pub meta: Metadata,",
+            "    pub amount: i128,\n    pub meta: Metadata,\n    pub frozen: Option<bool>,",
+        );
+        let project = Project::open(dir.path()).unwrap();
+        crate::commands::schema::export_summary(&project, false).unwrap();
+        (dir, project)
+    }
+
+    #[test]
+    fn an_embedded_shape_changing_under_an_untouched_schema_is_denied() {
+        // Issue #7: `Balance` is untouched, `Metadata` gains a required field, and
+        // every stored entry would trap on decode. This used to report "safe".
+        let (dir, project) = project_embedding_metadata();
+        assert!(run(&project, &args()).is_ok());
+
+        write_metadata(dir.path(), "    pub memo: Symbol,\n    pub flag: bool,");
+        let error = run(&project, &args()).unwrap_err();
+        assert!(error.to_string().contains("deny"), "got: {error}");
+
+        let committed = project.schema_set().unwrap();
+        let mut report = Report::default();
+        collect_drift(&project, &committed, &mut report);
+        assert!(
+            report.drift.iter().any(|d| d.severity == Severity::Denied
+                && d.detail
+                    .contains("`meta` via Metadata.flag: added, required")),
+            "{:#?}",
+            report.drift
+        );
+    }
+
+    #[test]
+    fn a_snapshot_written_before_embedded_shapes_were_recorded_is_warned_and_backfilled() {
+        let (_dir, project) = project_embedding_metadata();
+        // Rewrite both snapshots the way an earlier release wrote them.
+        for version in [1, 2] {
+            let mut schema = project
+                .schema_set()
+                .unwrap()
+                .get("Balance", version)
+                .unwrap()
+                .clone();
+            schema.nested.clear();
+            std::fs::write(project.schema_path("Balance", version), schema.to_json()).unwrap();
+        }
+
+        let committed = project.schema_set().unwrap();
+        let mut report = Report::default();
+        collect_drift(&project, &committed, &mut report);
+        assert_eq!(report.drift.len(), 2, "{:#?}", report.drift);
+        assert!(report.drift.iter().all(|d| d.severity == Severity::Warning));
+        assert!(
+            run(&project, &args()).is_ok(),
+            "a warning must not fail the default gate"
+        );
+
+        // `schema export` completes the old snapshots rather than refusing them.
+        crate::commands::schema::export_summary(&project, false).unwrap();
+        let committed = project.schema_set().unwrap();
+        assert!(committed
+            .get("Balance", 1)
+            .unwrap()
+            .nested
+            .contains_key("Metadata"));
+        let mut report = Report::default();
+        collect_drift(&project, &committed, &mut report);
+        assert!(report.drift.is_empty(), "{:#?}", report.drift);
     }
 
     #[test]

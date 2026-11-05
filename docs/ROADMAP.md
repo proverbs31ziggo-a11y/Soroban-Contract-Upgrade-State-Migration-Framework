@@ -43,7 +43,7 @@ The framework is tested up to the network boundary. This milestone takes it acro
 
 ## Milestone 3 — covers every real schema
 
-* Follow shape changes nested inside a field's type — #7
+* ~~Follow shape changes nested inside a field's type~~ — done (#7)
 * Enums as stored values — #8
 * Temporary storage, and a defined outcome when an entry expires mid-migration — #9
 * Changes of storage durability between versions — #10

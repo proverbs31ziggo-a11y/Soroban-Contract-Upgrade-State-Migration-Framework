@@ -161,13 +161,20 @@ impl Project {
             )));
         }
 
+        // All files at once, because a schema's embedded structs usually live in a
+        // different file from the schema itself.
+        let names: Vec<String> = sources
+            .iter()
+            .map(|(p, _)| p.display().to_string())
+            .collect();
+        let files: Vec<(&str, &str)> = names
+            .iter()
+            .zip(&sources)
+            .map(|(name, (_, text))| (name.as_str(), text.as_str()))
+            .collect();
         let mut set = SchemaSet::new();
-        for (path, text) in &sources {
-            for schema in
-                soroban_migrate_schema::parse::parse_source(&path.display().to_string(), text)?
-            {
-                set.insert(schema)?;
-            }
+        for schema in soroban_migrate_schema::parse::parse_sources(&files)? {
+            set.insert(schema)?;
         }
         Ok(set)
     }
@@ -310,6 +317,16 @@ impl Project {
                 std::fs::read_to_string(&path).map_err(|e| CliError::io(path.display(), e))?;
             if existing == text {
                 return Ok(WriteOutcome::Unchanged(path));
+            }
+            // A snapshot written before embedded shapes were recorded, and otherwise the
+            // same, is completed rather than refused: it gains information, and the shape
+            // it describes does not change. `check` has already warned that the recorded
+            // embedded shapes are today's and not necessarily those of the original.
+            let predates =
+                Schema::from_json(&existing).is_ok_and(|old| old.predates_nested_tracking(schema));
+            if predates {
+                std::fs::write(&path, text).map_err(|e| CliError::io(path.display(), e))?;
+                return Ok(WriteOutcome::Written(path));
             }
             return Err(CliError::Refused(format!(
                 "{} is already at v{} with a different shape. A shape must not change without \

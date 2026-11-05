@@ -122,6 +122,13 @@ fn export_schemas(project: &Project, check: bool) -> Result<()> {
                     Some(existing) if existing == schema => {
                         WriteOutcome::Unchanged(project.schema_path(name, version))
                     }
+                    Some(existing) if existing.predates_nested_tracking(schema) => {
+                        drift.push(format!(
+                            "{} v{version} does not record the shapes it embeds yet",
+                            schema.name
+                        ));
+                        WriteOutcome::Written(project.schema_path(name, version))
+                    }
                     Some(_) => {
                         drift.push(format!(
                             "{} v{version} changed in the source without its version changing; \
