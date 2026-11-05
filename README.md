@@ -1,6 +1,16 @@
 # soroban-migrate
 
+[![CI](https://github.com/proverbs31ziggo-a11y/Soroban-Contract-Upgrade-State-Migration-Framework/actions/workflows/ci.yml/badge.svg)](https://github.com/proverbs31ziggo-a11y/Soroban-Contract-Upgrade-State-Migration-Framework/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Soroban SDK 28](https://img.shields.io/badge/soroban--sdk-28-7d00ff.svg)](https://crates.io/crates/soroban-sdk)
+[![good first issues](https://img.shields.io/github/issues/proverbs31ziggo-a11y/Soroban-Contract-Upgrade-State-Migration-Framework/good%20first%20issue?label=good%20first%20issues&color=7057ff)](https://github.com/proverbs31ziggo-a11y/Soroban-Contract-Upgrade-State-Migration-Framework/issues?q=is%3Aopen+label%3A%22good+first+issue%22)
+
 Versioned storage-schema migrations for Soroban contracts.
+
+> **Status: 0.1, pre-release.** The compatibility checker, code generator and on-chain
+> runtime are complete and tested (248 tests in CI). Running against a live network is
+> the next milestone — see the [roadmap](docs/ROADMAP.md). Contributions are welcome:
+> start with [CONTRIBUTING.md](CONTRIBUTING.md).
 
 A Soroban contract can replace its Wasm. **Nothing migrates the state underneath.**
 Change a struct's shape and every existing persistent entry becomes unreadable — and
@@ -16,8 +26,8 @@ CAP-86's own motivation says why it was needed: adding or removing a field "has
 rendered contracts unusable after an update".
 
 Those CAPs remove the blockers. This repository is the part that was left: the
-developer-facing framework on top — versioned schemas, generated up/down migration
-code, a compatibility checker that refuses unsafe upgrades, and a batched executor that
+developer-facing framework on top — versioned schemas, generated migration code, a
+compatibility checker that refuses unsafe upgrades, and a batched executor that
 respects a transaction's resource limits. See [`docs/cap-85-86.md`](docs/cap-85-86.md)
 for exactly which primitive each mechanism depends on.
 
@@ -260,6 +270,16 @@ The tests that carry the most weight, and what they are evidence for:
 | `examples/vault/tests/atomicity.rs` | a failed batch leaves no entries and no cursor; the unbatched migration exceeds the caps |
 | `examples/vault/tests/upgrade.rs` | the whole upgrade end to end on a deployed contract, with the application serving throughout |
 | `soroban-migrate-cli/tests/example_project.rs` | the CLI on a real project: snapshots current, gate passing, generated file reproducible byte for byte |
+
+## Contributing
+
+Issues are labelled by complexity (`trivial`, `medium`, `high`) and by crate, and the
+[`good first issue`](https://github.com/proverbs31ziggo-a11y/Soroban-Contract-Upgrade-State-Migration-Framework/issues?q=is%3Aopen+label%3A%22good+first+issue%22)
+ones name the files to touch. [CONTRIBUTING.md](CONTRIBUTING.md) covers setup, the
+checks CI runs, and the rules that protect deployed contracts. Report security
+problems privately, as described in [SECURITY.md](SECURITY.md).
+
+Where the project is heading: [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## License
 

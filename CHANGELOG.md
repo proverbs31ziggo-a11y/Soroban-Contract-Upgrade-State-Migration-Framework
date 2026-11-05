@@ -25,6 +25,8 @@ changes; each one is listed rather than left to be discovered.
 
 ### Added
 
+* `CONTRIBUTING.md`, `SECURITY.md` (with a threat model), `CODE_OF_CONDUCT.md`, issue
+  and pull-request templates, and `docs/ROADMAP.md`.
 * `LICENSE` containing the Apache License 2.0, which all four crate manifests already
   declared.
 * This changelog.
