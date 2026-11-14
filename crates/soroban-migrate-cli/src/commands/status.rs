@@ -12,6 +12,8 @@
 //! signature. Both are read-only, which is what makes `status` safe to run against
 //! mainnet while a migration is in flight.
 
+use std::fmt::Write as _;
+
 use crate::batch::MigrationStatusView;
 use crate::config::{ContractCall, Network};
 use crate::error::{CliError, Result};
@@ -57,7 +59,15 @@ pub fn run(project: &Project, args: &Args) -> Result<()> {
     }
 
     let status = MigrationStatusView::parse(&status_output)?;
-    println!(
+    print!("{}", format_status(&status, version, args.limit));
+    Ok(())
+}
+
+/// Renders the migration status lines for an active or finished migration.
+fn format_status(status: &MigrationStatusView, version: Option<u32>, limit: u32) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
         "  migration:        v{} -> v{}, {}",
         status.from,
         status.to,
@@ -68,39 +78,47 @@ pub fn run(project: &Project, args: &Args) -> Result<()> {
         }
     );
     let done = status.cursor.min(status.total);
-    println!(
+    let _ = writeln!(
+        out,
         "  progress:         {done}/{} ({:.2}%)",
         status.total,
-        f64::from(status.cursor.min(status.total)) * 100.0 / f64::from(status.total.max(1))
+        f64::from(done) * 100.0 / f64::from(status.total.max(1))
     );
+
+    if !status.active {
+        let _ = writeln!(
+            out,
+            "\n  The migration is finished. Call `confirm_migration` on the contract to discard \
+             its bookkeeping."
+        );
+        return out;
+    }
+
     let remaining = status.remaining();
-    println!(
-        "  remaining:        {remaining} keys, about {} transaction{} at {} per batch",
-        transactions_needed(remaining, args.limit),
-        if transactions_needed(remaining, args.limit) == 1 {
-            ""
-        } else {
-            "s"
-        },
-        args.limit
+    let txs = transactions_needed(remaining, limit);
+    let _ = writeln!(
+        out,
+        "  remaining:        {remaining} keys, about {txs} transaction{} at {limit} per batch",
+        if txs == 1 { "" } else { "s" },
     );
     if remaining > 0 && version == Some(status.from) {
-        println!(
+        let _ = writeln!(
+            out,
             "\n  The contract still reports v{}, so it is safe to keep serving: un-migrated \
              entries decode through the new shape while the batches catch up.",
             status.from
         );
     }
-    println!(
-        "\n  A batch of {} is {}. Run `soroban-migrate run` to see what the next one would cost, \
-         or `soroban-migrate run --submit` to apply it.",
-        args.limit,
+    let _ = writeln!(
+        out,
+        "\n  A batch of {limit} is {}. Run `soroban-migrate run` to see what the next one would \
+         cost, or `soroban-migrate run --submit` to apply it.",
         percent_of(
-            u64::from(args.limit),
+            u64::from(limit),
             u64::from(soroban_migrate::MAX_KEYS_PER_BATCH)
         )
     );
-    Ok(())
+    out
 }
 
 /// The project's network settings and contract entry points, or an error saying what
@@ -138,4 +156,53 @@ pub(crate) fn call(stellar: &Stellar, network: &Network, function: &str) -> Resu
         function: function.to_string(),
         args: Vec::new(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finished_migration_does_not_suggest_another_batch() {
+        let status = MigrationStatusView {
+            from: 1,
+            to: 2,
+            cursor: 6,
+            total: 6,
+            active: false,
+        };
+        let rendered = format_status(&status, Some(2), 100);
+        assert!(rendered.contains("v1 -> v2, finished"), "got:\n{rendered}");
+        assert!(rendered.contains("6/6 (100.00%)"), "got:\n{rendered}");
+        assert!(
+            rendered.contains("confirm_migration"),
+            "finished status should mention confirm_migration:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("remaining:"),
+            "finished status must not report remaining keys:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("run --submit"),
+            "finished status must not suggest running another batch:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn active_migration_reports_remaining_keys_and_batch_hint() {
+        let status = MigrationStatusView {
+            from: 1,
+            to: 2,
+            cursor: 2,
+            total: 6,
+            active: true,
+        };
+        let rendered = format_status(&status, Some(1), 100);
+        assert!(rendered.contains("v1 -> v2, in flight"), "got:\n{rendered}");
+        assert!(
+            rendered.contains("remaining:        4 keys, about 1 transaction at 100 per batch"),
+            "got:\n{rendered}"
+        );
+        assert!(rendered.contains("run --submit"), "got:\n{rendered}");
+    }
 }

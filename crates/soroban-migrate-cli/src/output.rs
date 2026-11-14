@@ -83,13 +83,12 @@ pub fn thousands(value: u64) -> String {
 ///
 /// The ceiling division is the point: 1000 entries at 150 per batch is seven
 /// transactions, not six, and an operator who budgets for six sends a batch that
-/// fails. Always one batch is needed even for zero entries, because the batch that
-/// finishes the migration is the one that advances the version.
+/// fails. Zero remaining entries need zero transactions.
 pub fn transactions_needed(remaining: u32, batch_size: u32) -> u32 {
     if batch_size == 0 {
         return 0;
     }
-    remaining.div_ceil(batch_size).max(1)
+    remaining.div_ceil(batch_size)
 }
 
 /// A multi-line indented block, for a finding's detail.
@@ -130,8 +129,7 @@ mod tests {
         assert_eq!(transactions_needed(1_000, 150), 7);
         assert_eq!(transactions_needed(900, 150), 6);
         assert_eq!(transactions_needed(901, 150), 7);
-        // Zero entries still needs the one batch that advances the version.
-        assert_eq!(transactions_needed(0, 150), 1);
+        assert_eq!(transactions_needed(0, 150), 0);
         assert_eq!(transactions_needed(5, 0), 0);
     }
 
