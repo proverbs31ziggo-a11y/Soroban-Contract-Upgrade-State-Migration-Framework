@@ -2,7 +2,10 @@
 //!
 //! Schemas are declared with an attribute on the struct that carries the shape:
 //!
-//! ```ignore
+//! ```
+//! use soroban_migrate_schema::parse::parse_source;
+//!
+//! let src = r#"
 //! /// Balances held for a single account.
 //! #[storage_schema(version = 2)]
 //! #[contracttype]
@@ -11,6 +14,12 @@
 //!     pub amount: i128,
 //!     pub frozen: Option<bool>,
 //! }
+//! "#;
+//!
+//! let schemas = parse_source("src/schema.rs", src).unwrap();
+//! assert_eq!(schemas.len(), 1);
+//! assert_eq!(schemas[0].version, 2);
+//! assert_eq!(schemas[0].field_names(), vec!["owner", "amount", "frozen"]);
 //! ```
 //!
 //! # Why the parser is in the library rather than only in the proc macro
