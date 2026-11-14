@@ -85,6 +85,8 @@ $ soroban-migrate run                        # simulate the next batch; sends no
 $ soroban-migrate run --submit               # apply batches until the migration finishes
 ```
 
+For a step-by-step walkthrough starting from a minimal contract, see [**Your First Migration** (docs/tutorial.md)](docs/tutorial.md).
+
 The worked example is [`examples/vault`](examples/vault). It is a real adoption of the
 CLI: its `soroban-migrate.toml`, its committed snapshots, and its generated migration
 are all in the tree, and `cargo test` runs the CLI against them.
