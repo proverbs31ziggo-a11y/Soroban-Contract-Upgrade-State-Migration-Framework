@@ -13,9 +13,9 @@
 //! [`Keyspace`] implementation for that enum. Collisions become a compile-time
 //! impossibility instead of a documented convention.
 //!
-//! ```ignore
+//! ```
 //! use soroban_migrate::key::{Keyspace, MigrationKey};
-//! use soroban_sdk::{contracttype, Env, Val};
+//! use soroban_sdk::{contracttype, Address, Env, IntoVal, Val};
 //!
 //! #[contracttype]
 //! pub enum DataKey {
